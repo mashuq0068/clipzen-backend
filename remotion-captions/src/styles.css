@@ -1,0 +1,48 @@
+@font-face {
+  font-family: "Montserrat";
+  src: url("../public/fonts/montserrat.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("../public/fonts/bebasNeue.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Audiowide";
+  src: url("../public/fonts/audiowide.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Bangers";
+  src: url("../public/fonts/bangers.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Lobster";
+  src: url("../public/fonts/lobster.ttf") format("truetype"); 
+}
+@font-face {
+  font-family: "Nano Sans";
+  src: url("../public/fonts/nanoSans.ttf") format("truetype"); 
+}
+@font-face {
+  font-family: "Poppins";
+  src: url("../public/fonts/poppins.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Courier Prime";
+  src: url("../public/fonts/courierPrime.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Oswald";
+  src: url("../public/fonts/oswald.ttf") format("truetype"); 
+}
+@font-face {
+  font-family: "Permanent Marker";
+  src: url("../public/fonts/permanentMarker.ttf") format("truetype");  
+}
+@font-face {
+  font-family: "Playfair Display";
+  src: url("../public/fonts/playfairDisplay.ttf") format("truetype");  
+}
+@font-face {
+  font-family: "Russo One";
+  src: url("../public/fonts/russoOne.ttf") format("truetype");  
+}

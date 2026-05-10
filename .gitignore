@@ -1,0 +1,15 @@
+node_modules
+.env
+uploads
+outputs
+*.mp4
+*.mp3
+tmp/
+remotion-captions/public/
+vid*.mp4vid.mp3 vid3.mp3
+remotion-captions/public/
+tmp/
+vid.mp4 vid2.mp4 vid3.mp4
+vid.mp3 vid3.mp3
+remotion-captions/public/
+tmp/
