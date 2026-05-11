@@ -260,9 +260,11 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
     .reduce((acc, s) => acc + (s.endT - s.startT), 0);
   const isSplit = splitDuration / clipDuration > 0.4;
 
-  // Split-dominant clip (≥70% of raw frames): use stable averaged split positions
+  // Split-dominant clip (≥50% of raw frames): use stable averaged split positions.
+  // Lowered from 70%: podcasts with b-roll cutaways may never hit 70% split even
+  // when split IS the primary framing. 50% is the right commit threshold.
   const rawSplitFrac = rawSegments.filter(s => s.decision.mode === "split").length / (rawSegments.length || 1);
-  if (rawSplitFrac >= 0.70) {
+  if (rawSplitFrac >= 0.50) {
     console.log(`[clipCutter] split-dominant (${(rawSplitFrac * 100).toFixed(0)}%) → stable split filter`);
     return buildStableSplitFilterSpec(timeline, srcW, srcH, grade, fade);
   }

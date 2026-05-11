@@ -25,7 +25,7 @@ const fs = require("fs");
 const pathModule = require("path");
 
 // CHANGE 1: Updated import to include buildFullVideoLayoutMap
-const { analyzeClipTimeline, buildFullVideoLayoutMap } = require("../services/speakerReframer");
+const { analyzeClipTimeline } = require("../services/speakerReframer");
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "localhost",
@@ -313,27 +313,16 @@ const worker = new Worker(
       const segments = await transcribeVideo(videoPath);
       console.log(`${segments.length} segments`);
 
-      // CHANGE 2: Build full-video layout map BEFORE selecting clips
-      console.log(`\nBuilding full-video layout map (sparse scan)...`);
-      let fullVideoTimeline = [];
-      try {
-        fullVideoTimeline = await buildFullVideoLayoutMap(videoPath);
-        console.log(`  Layout map: ${fullVideoTimeline.length} entries`);
-      } catch (layoutErr) {
-        console.warn(`  Layout map failed (non-fatal): ${layoutErr.message}`);
-        // Proceeding without layout map — clip selection still works, just without
-        // layout stability scoring. This is the graceful fallback path.
-      }
 
       console.log(`\nSelecting story clips...`);
-      const selectedClips = await selectClips(
-        segments,
-        dbJob.clip_count || 5,   // exact user-requested count
-        dbJob.clip_duration || "auto",
-        platforms,
-        videoPath,
-        fullVideoTimeline,   // ← pass sparse layout data for clip scoring
-      );
+    const selectedClips = await selectClips(
+    segments,
+    dbJob.clip_count || 5,
+    dbJob.clip_duration || "auto",
+    platforms,
+    videoPath,
+    [],   // empty — layout scoring disabled, clips selected by transcript only
+);
 
       if (!selectedClips || selectedClips.length === 0)
         throw new Error("No clips selected");

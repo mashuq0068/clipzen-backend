@@ -1,80 +1,93 @@
 "use strict";
 
 /**
- * speakerReframer.js  —  Clipzen v3
+ * speakerReframer.js  —  Clipora v6
  *
- * CHANGES vs v2:
- *   1. Python script now returns per-frame scene-change flag via histogram
- *      correlation. Transitional frames get 0.3 vote weight instead of 1.0,
- *      so lighting pops / exposure shifts can't flip a stable layout decision.
- *   2. classifyFrame() now returns face_left / face_right for 2-face frames
- *      that don't qualify as a clean split. These let downstream cuts animate
- *      between the focused speaker rather than always picking the biggest face.
- *   3. isWideLayout flag on split decisions when faces are >50% apart (complex
- *      panel seating — 2 people left, 2 right). clipCutter uses this to apply
- *      less zoom so edge speakers are never cropped out.
- *   4. globalVote() does weighted voting and normalises face_left/face_right
- *      into the "face" bucket for dominant-mode comparison.
- *   5. smoothTimeline() treats face / face_left / face_right identically in
- *      hysteresis smoothing via _isFaceMode() helper.
- *   6. buildFullVideoLayoutMap() now samples at 3 s intervals (was 1 s) and
- *      caps at 300 samples — ~3× cheaper on long videos with equal coarse accuracy.
- *   7. _runPythonChunk() unpacks the new { faces, sceneChange } dict format
- *      from Python and stores sceneChange alongside the face array.
- *   8. analyzeClipTimeline() and buildFullVideoLayoutMap() both propagate
- *      sceneChange into classifyFrame() and the raw timeline.
+ * ARCHITECTURE: Single-pass YOLO scan (no histogram pre-pass)
+ *
+ * How it works:
+ *   1. Sample every SCAN_INTERVAL seconds across the full clip with YOLO face detection.
+ *      Uses CAP_PROP_POS_MSEC (time-based seeking) — stable on Windows, no frame-seek crashes.
+ *   2. Classify each sampled frame independently → per-frame layout decision.
+ *   3. Group consecutive frames with the same layout into segments using a
+ *      change-detection pass (a new segment starts when the mode flips and holds
+ *      for at least BOUNDARY_CONFIRM_FRAMES in a row — avoids noise-induced splits).
+ *   4. Each segment independently votes from its own frames → segment winner.
+ *   5. Merge segments shorter than MIN_SEGMENT_SECS into their neighbour.
+ *   6. Expand segments into a per-second timeline for clipCutter.
+ *   7. Inject variety (occasional left/right/face focus) inside long stable segments.
+ *
+ * Layout classification rules (from images):
+ *   Image 1 — 4-person Zoom grid (faces in 2×2 tile rows+cols) → blur_overlay
+ *   Image 2 — 4-person physical round-table (same height, spread L→R) → split
+ *   Image 3 — 2-person interview (L and R, facing each other) → split
+ *
+ * Grid vs panel distinction:
+ *   - Grid: cy std-dev HIGH (faces stacked in rows) AND cx spread HIGH → blur_overlay
+ *   - Panel: cy std-dev LOW (everyone at same table height) → split
+ *
+ * Performance:
+ *   - No histogram Python process at all (was crashing on Windows anyway)
+ *   - YOLO frames chunked to MAX_FRAMES_PER_CHUNK (default 30) per subprocess call
+ *   - Sequential MSEC seeking inside each subprocess → no random-seek crash
+ *   - Short clips (≤ DENSE_SCAN_MAX_SECS) use 1s interval directly (same code path)
+ *   - Longer clips use 2s interval to halve the number of YOLO calls
  */
 
-const { exec } = require("child_process");
-const path = require("path");
-const fs = require("fs");
-const util = require("util");
+const { exec }  = require("child_process");
+const path      = require("path");
+const fs        = require("fs");
+const util      = require("util");
 
-const execAsync = util.promisify(exec);
+const execAsync     = util.promisify(exec);
+const execFileAsync = util.promisify(require("child_process").execFile);
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const PYTHON = process.env.PYTHON_PATH ||
+const PYTHON  = process.env.PYTHON_PATH ||
   (process.platform === "win32"
     ? "C:\\Users\\ASUS\\AppData\\Local\\Python\\bin\\python.exe"
     : "python3");
 
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
 
-// Per-clip dense scan interval. 1.0 s = good balance of accuracy vs CPU.
-const SAMPLE_INTERVAL = parseFloat(process.env.REFRAMER_SAMPLE_INTERVAL || "1.0");
+// How many seconds between YOLO samples for clips > DENSE_SCAN_MAX_SECS
+const SCAN_INTERVAL_LONG  = parseFloat(process.env.SCAN_INTERVAL_LONG  || "2.0");
+// How many seconds between YOLO samples for short clips
+const SCAN_INTERVAL_SHORT = parseFloat(process.env.SCAN_INTERVAL_SHORT || "1.0");
+// Clips ≤ this duration use the short interval
+const DENSE_SCAN_MAX_SECS = parseFloat(process.env.DENSE_SCAN_MAX_SECS || "30.0");
 
-// Full-video SPARSE scan interval (used only for layout map / clip scoring).
-// 3.0 s is ~3× cheaper and still catches all camera cuts.
-const LAYOUT_MAP_INTERVAL = parseFloat(process.env.LAYOUT_MAP_INTERVAL || "3.0");
+// How many consecutive frames of a *new* mode before we commit a segment boundary.
+// Prevents single noisy frames from creating fake boundaries.
+const BOUNDARY_CONFIRM_FRAMES = parseInt(process.env.BOUNDARY_CONFIRM_FRAMES || "2", 10);
 
-// Minimum consecutive seconds a layout must hold before we commit to it.
+// Merge segments shorter than this into neighbour (seconds)
+const MIN_SEGMENT_SECS = parseFloat(process.env.MIN_SEGMENT_SECS || "4.0");
+
+// Minimum layout hold for timeline smoother
 const MIN_HOLD_SECS = parseFloat(process.env.REFRAMER_MIN_HOLD || "1.5");
 
-// What fraction of frames must agree on a mode for it to win the global vote.
-const GLOBAL_VOTE_THRESHOLD = 0.55;
+// Max YOLO frames per subprocess call
+const MAX_FRAMES_PER_CHUNK = parseInt(process.env.REFRAMER_CHUNK_SIZE || "30", 10);
 
-// Split: minimum horizontal separation between face centers (normalized 0-1).
-const SPLIT_MIN_CX_DIFF = 0.18;
+// ─── Variety injection config ─────────────────────────────────────────────────
+const VARIETY_MIN_SECS      = parseFloat(process.env.VARIETY_MIN_SECS      || "15.0");
+const VARIETY_INTERVAL_SECS = parseFloat(process.env.VARIETY_INTERVAL_SECS || "12.0");
+const VARIETY_HOLD_SECS     = parseFloat(process.env.VARIETY_HOLD_SECS     || "4.0");
 
-// Split: maximum vertical separation — prevents top/bottom stacking being called "split"
-const SPLIT_MAX_CY_DIFF = 0.40;
-
-// Split: minimum area ratio between larger and smaller face.
-const SPLIT_MIN_AREA_RATIO = 0.20;
-
-// Split: minimum individual face area (normalized).
-const SPLIT_MIN_FACE_AREA = 0.010;
-
-// Split: if faces are this far apart horizontally, flag as wide-layout panel.
-// clipCutter uses SPLIT_ZOOM_WIDE instead of SPLIT_ZOOM for these.
+// ─── Split / face thresholds ──────────────────────────────────────────────────
+const SPLIT_MIN_CX_DIFF         = 0.14;
+const SPLIT_MAX_CY_DIFF         = 0.40;
+const SPLIT_MIN_AREA_RATIO      = 0.15;
+const SPLIT_MIN_FACE_AREA       = 0.006;
 const SPLIT_WIDE_LAYOUT_CX_DIFF = 0.50;
+const FACE_MIN_AREA             = 0.006;
+const SECOND_FACE_TINY_RATIO    = 0.18;
+const SCENE_CHANGE_VOTE_WEIGHT  = 0.3;
 
-// Face: minimum area to be considered a "dominant" single speaker.
-const FACE_MIN_AREA = 0.008;
-
-// Scene-change: histogram correlation below (1 - this threshold) = likely transition.
-// Frames flagged as scene changes count as 0.3 votes in globalVote.
-const SCENE_CHANGE_HIST_THRESH = 0.42;
+// ─── Grid vs in-person panel thresholds ──────────────────────────────────────
+const GRID_CY_STDDEV_THRESH = 0.12;
+const GRID_CX_SPREAD_THRESH = 0.40;
 
 const TMP_DIR = process.env.TMP_DIR
   ? path.resolve(process.env.TMP_DIR)
@@ -84,72 +97,96 @@ function ensureTmp() {
   if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
-// ─── Python face detection script ─────────────────────────────────────────────
-// Returns per-frame data: { "t": { faces: [...], sceneChange: bool } }
-// Face IDs are assigned in JS (not Python) for stability.
-// sceneChange is set when the grayscale histogram correlation with the
-// previous sample drops below the threshold — catches lighting pops,
-// exposure shifts, and camera cuts between frames.
+// ─── Python YOLO face detection script ───────────────────────────────────────
+// Uses CAP_PROP_POS_MSEC for seeking — stable on Windows FFMPEG backend.
+// Receives a list of timestamps (seconds), returns per-timestamp face arrays.
 const FACE_SCRIPT = `
-import sys, json, warnings, os
+import sys, json, warnings, os, traceback
 warnings.filterwarnings("ignore")
 
-video_path = sys.argv[1]
-times_file = sys.argv[2]
+def log_debug(msg):
+    print(f"DEBUG: {msg}", file=sys.stderr)
+    sys.stderr.flush()
 
-with open(times_file) as f:
-    sample_times = json.load(f)
+def fatal(msg, tb=None):
+    out = {"ok": False, "error": msg, "traceback": tb or ""}
+    try:
+        print(json.dumps(out))
+        sys.stdout.flush()
+    except Exception:
+        pass
+    sys.exit(0)
 
-SCENE_HIST_THRESH = ${SCENE_CHANGE_HIST_THRESH}
+def _excepthook(exc_type, exc_value, exc_tb):
+    fatal(str(exc_value), "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+sys.excepthook = _excepthook
 
 try:
-    import cv2
-    from ultralytics import YOLO
-    import logging
-    logging.getLogger("ultralytics").setLevel(logging.ERROR)
+    if len(sys.argv) < 3:
+        fatal(f"Missing arguments. Expected video_path and args_file, got: {sys.argv}")
 
-    CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "yolov8-face")
+    video_path = sys.argv[1]
+    args_file  = sys.argv[2]
+
+    log_debug(f"Starting YOLO script for {video_path}")
+
+    with open(args_file, encoding="utf-8") as f:
+        payload = json.load(f)
+
+    sample_times = payload.get("sample_times", payload) if isinstance(payload, dict) else payload
+
+    try:
+        import cv2
+    except ImportError as e:
+        fatal(f"cv2 import failed: {e}")
+    except Exception as e:
+        fatal(f"cv2 import error: {e}", traceback.format_exc())
+
+    try:
+        from ultralytics import YOLO
+        import logging
+        logging.getLogger("ultralytics").setLevel(logging.ERROR)
+    except ImportError as e:
+        fatal(f"ultralytics import failed — pip install ultralytics ({e})")
+    except Exception as e:
+        fatal(f"ultralytics import error — {e}", traceback.format_exc())
+
+    log_debug(f"OpenCV {cv2.__version__} and YOLO imported")
+
+    CACHE_DIR  = os.path.join(os.path.expanduser("~"), ".cache", "yolov8-face")
     MODEL_PATH = os.path.join(CACHE_DIR, "yolov8n-face.pt")
-    MODEL_URL = "https://github.com/akanametov/yolo-face/releases/download/1.0.0/yolov8n-face.pt"
+    MODEL_URL  = "https://github.com/akanametov/yolo-face/releases/download/1.0.0/yolov8n-face.pt"
 
     if not os.path.exists(MODEL_PATH):
         import urllib.request
         os.makedirs(CACHE_DIR, exist_ok=True)
-        sys.stderr.write("[yolo] downloading yolov8n-face.pt...\\n")
+        log_debug("Downloading yolov8n-face model...")
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        sys.stderr.write("[yolo] model downloaded\\n")
+        log_debug("Model downloaded")
 
     model = YOLO(MODEL_PATH)
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+    # Use FFMPEG backend + MSEC seeking — avoids Windows frame-seek crash
+    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        fatal(f"VideoCapture could not open: {video_path}")
+
     out = {}
-    prev_hist = None
 
     for t in sample_times:
-        frame_idx = int(t * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        # MSEC-based seeking — stable on Windows, avoids CAP_PROP_POS_FRAMES crash
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
         ok, frame = cap.read()
         if not ok:
-            out[str(t)] = {"faces": [], "sceneChange": False}
-            prev_hist = None
+            out[str(t)] = []
             continue
 
-        # ── Scene-change detection via grayscale histogram correlation ──────────
-        scene_change = False
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
-        cv2.normalize(hist, hist)
-        if prev_hist is not None:
-            corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
-            # corr near 1.0 = same scene, near 0 = very different
-            scene_change = corr < (1.0 - SCENE_HIST_THRESH)
-        prev_hist = hist
-
-        h, w = frame.shape[:2]
-
-        results = model(frame, conf=0.40, imgsz=640, verbose=False)[0]
-
+        h, w    = frame.shape[:2]
+        results = model(frame, conf=0.25, imgsz=640, verbose=False)[0]
         candidates = []
+
         if results.boxes is not None and len(results.boxes) > 0:
             boxes_xyxy = results.boxes.xyxy.cpu().tolist()
             boxes_conf = results.boxes.conf.cpu().tolist()
@@ -163,56 +200,53 @@ try:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                bw = (x2 - x1) / w
-                bh = (y2 - y1) / h
+                bw   = (x2 - x1) / w
+                bh   = (y2 - y1) / h
                 area = bw * bh
 
-                if area < 0.004:
+                if area < 0.003:
                     continue
-
                 aspect = bw / bh if bh > 0 else 0
-                if aspect > 2.0 or aspect < 0.25:
+                if aspect > 2.0 or aspect < 0.30:
                     continue
-
                 if y1 < 2:
                     continue
 
                 cx = ((x1 + x2) / 2) / w
                 cy = ((y1 + y2) / 2) / h
                 candidates.append({
-                    "cx": round(cx, 4),
-                    "cy": round(cy, 4),
-                    "w":  round(bw, 4),
-                    "h":  round(bh, 4),
+                    "cx":   round(cx, 4),
+                    "cy":   round(cy, 4),
+                    "w":    round(bw, 4),
+                    "h":    round(bh, 4),
                     "area": round(area, 5),
                     "conf": round(conf, 3),
                 })
 
-        # Deduplicate — keep the larger of any two very close detections
         candidates.sort(key=lambda f: f["area"], reverse=True)
         deduped = []
         for c in candidates:
-            is_dup = False
-            for kept in deduped:
-                if abs(c["cx"] - kept["cx"]) < 0.09 and abs(c["cy"] - kept["cy"]) < 0.09:
-                    is_dup = True
-                    break
+            is_dup = any(
+                abs(c["cx"] - k["cx"]) < 0.09 and abs(c["cy"] - k["cy"]) < 0.09
+                for k in deduped
+            )
             if not is_dup:
                 deduped.append(c)
 
-        out[str(t)] = {"faces": deduped[:4], "sceneChange": scene_change}
+        out[str(t)] = deduped[:6]
 
     cap.release()
     print(json.dumps({"ok": True, "frames": out}))
+    sys.stdout.flush()
 
 except Exception as e:
-    import traceback
-    print(json.dumps({"ok": False, "error": str(e), "traceback": traceback.format_exc()}))
+    fatal(str(e), traceback.format_exc())
 `.trim();
 
+// ─── Script path helper ───────────────────────────────────────────────────────
 function getFaceScriptPath() {
   ensureTmp();
-  const p = path.join(TMP_DIR, "_reframe_faces_v30.py");
+  const p = path.join(TMP_DIR, "_reframe_faces_v60.py");
   if (!fs.existsSync(p) || fs.readFileSync(p, "utf8") !== FACE_SCRIPT) {
     fs.writeFileSync(p, FACE_SCRIPT);
   }
@@ -233,381 +267,491 @@ async function probe(videoPath) {
   };
 }
 
-// ─── Python runner ────────────────────────────────────────────────────────────
-// Max frames per single Python call. Keeps memory usage bounded on CPU machines.
-const MAX_FRAMES_PER_CHUNK = parseInt(process.env.REFRAMER_CHUNK_SIZE || "30", 10);
+// ─── Generic Python script runner ─────────────────────────────────────────────
+async function _runScript(scriptPath, videoPath, payload) {
+  ensureTmp();
+  const tmpJson = path.join(
+    TMP_DIR,
+    `_args_${Date.now()}_${Math.random().toString(36).slice(2)}.json`
+  );
+  fs.writeFileSync(tmpJson, JSON.stringify(payload));
 
-async function _runPythonChunk(videoPath, chunkTimes) {
-  const scriptPath = getFaceScriptPath();
-  const tmpJson = path.join(TMP_DIR, `_ftimes_${Date.now()}_${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(tmpJson, JSON.stringify(chunkTimes));
+  function _parseStdout(raw) {
+    if (!raw?.trim()) return null;
+    const lines = raw.trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line.startsWith("{")) continue;
+      try {
+        const r = JSON.parse(line);
+        if (typeof r.ok === "boolean") return r;
+      } catch {}
+    }
+    return null;
+  }
+
+  function _logStderr(raw, label = "[reframer/py]") {
+    if (!raw?.trim()) return;
+    const NOISE = ["FutureWarning", "DeprecationWarning", "UserWarning",
+                   "site-packages", "warnings.warn("];
+    const lines = raw.trim().split("\n")
+      .filter(l => !NOISE.some(n => l.includes(n)));
+    if (lines.length) console.warn(`${label} stderr:\n${lines.join("\n")}`);
+  }
 
   try {
-    const { stdout, stderr } = await execAsync(
-      `"${PYTHON}" "${scriptPath}" "${videoPath}" "${tmpJson}"`,
-      { timeout: 180_000, maxBuffer: 16 * 1024 * 1024 }
-    );
-    if (stderr && stderr.trim()) {
-      const firstLine = stderr.trim().split("\n")[0];
-      if (!firstLine.includes("FutureWarning") && !firstLine.includes("DeprecationWarning")) {
-        console.log("[reframer/python]", firstLine);
+    const { stdout, stderr } = await execFileAsync(
+      PYTHON,
+      [scriptPath, videoPath, tmpJson],
+      {
+        timeout:   180_000,
+        maxBuffer: 16 * 1024 * 1024,
+        env:       { ...process.env, PYTHONIOENCODING: "utf-8" },
       }
-    }
-    const lastLine = stdout.trim().split("\n").pop();
-    const result = JSON.parse(lastLine);
-    if (!result.ok) {
-      console.warn("[reframer] chunk error:", result.error?.split("\n")[0]);
+    );
+
+    _logStderr(stderr);
+    const result = _parseStdout(stdout);
+
+    if (!result) {
+      console.error("[reframer] script produced no JSON output.");
+      if (stderr?.trim()) console.error("[reframer] FULL stderr:\n" + stderr.trim());
       return null;
     }
-
-    // Unpack new dict format: { "t": { faces: [...], sceneChange: bool } }
-    // Also accepts old array format gracefully for backward compatibility.
-    const raw = result.frames;
-    const unpacked = {};
-    for (const [key, val] of Object.entries(raw)) {
-      if (Array.isArray(val)) {
-        // Old format — upgrade transparently
-        unpacked[key] = { faces: val, sceneChange: false };
-      } else {
-        unpacked[key] = { faces: val.faces || [], sceneChange: val.sceneChange === true };
-      }
+    if (!result.ok) {
+      console.warn("[reframer] script error:", result.error);
+      if (result.traceback) console.warn(result.traceback);
+      return null;
     }
-    return unpacked;
+    return result;
+
   } catch (e) {
-    const msg    = (e.message  || "").trim();
-    const stderr = (e.stderr   || "").trim().slice(0, 800);
-    const stdout = (e.stdout   || "").trim().slice(0, 400);
-    console.warn("[reframer] chunk failed —", msg.split("\n")[0]);
-    if (stderr) console.warn("[reframer] chunk stderr:", stderr);
-    if (stdout) console.warn("[reframer] chunk stdout:", stdout);
+    const result = _parseStdout(e.stdout);
+    if (result) {
+      if (result.ok) return result;
+      console.warn("[reframer] script error:", result.error);
+      return null;
+    }
+    console.error("[reframer] script failed:", e.message || e);
+    if (e.stderr?.trim()) console.error("[reframer] FULL stderr:\n" + e.stderr.trim());
     return null;
+
   } finally {
     try { fs.unlinkSync(tmpJson); } catch {}
   }
 }
 
-/**
- * detectFaces — splits sampleTimes into MAX_FRAMES_PER_CHUNK sized chunks,
- * runs each chunk independently, then merges results.
- * Returns { "timestamp": { faces: [...], sceneChange: bool } }
- *
- * Retry strategy:
- *   1. Halve the chunk on first failure (less memory pressure)
- *   2. Every-other-frame on second failure
- *   3. Empty arrays as final fallback — never kills the whole clip
- */
+// ─── YOLO runner with chunking + retry ────────────────────────────────────────
 async function detectFaces(videoPath, sampleTimes) {
-  if (sampleTimes.length === 0) return {};
-
+  if (!sampleTimes.length) return {};
+  const script = getFaceScriptPath();
   const chunks = [];
   for (let i = 0; i < sampleTimes.length; i += MAX_FRAMES_PER_CHUNK) {
     chunks.push(sampleTimes.slice(i, i + MAX_FRAMES_PER_CHUNK));
   }
-
-  console.log(`[reframer] ${sampleTimes.length} frames → ${chunks.length} chunk(s) of ≤${MAX_FRAMES_PER_CHUNK}`);
+  console.log(`[reframer/yolo] ${sampleTimes.length} frames → ${chunks.length} chunk(s)`);
 
   const merged = {};
-  const EMPTY = (t) => ({ [String(t)]: { faces: [], sceneChange: false } });
-
   for (let ci = 0; ci < chunks.length; ci++) {
-    const chunk = chunks[ci];
-    let result = await _runPythonChunk(videoPath, chunk);
+    const chunk  = chunks[ci];
+    let   result = await _runScript(script, videoPath, { sample_times: chunk });
 
-    // Retry 1: halve the chunk
     if (!result && chunk.length > 4) {
-      console.warn(`[reframer] chunk ${ci + 1}/${chunks.length} failed — retrying with half-size chunks`);
+      console.warn(`[reframer/yolo] chunk ${ci + 1} failed — retrying halved`);
       const half = Math.ceil(chunk.length / 2);
-      const rA = await _runPythonChunk(videoPath, chunk.slice(0, half));
-      const rB = await _runPythonChunk(videoPath, chunk.slice(half));
+      const rA   = await _runScript(script, videoPath, { sample_times: chunk.slice(0, half) });
+      const rB   = await _runScript(script, videoPath, { sample_times: chunk.slice(half) });
       if (rA || rB) {
-        result = { ...(rA || {}), ...(rB || {}) };
-        for (const t of chunk) {
-          if (!(String(t) in result)) Object.assign(result, EMPTY(t));
-        }
+        result = { ok: true, frames: { ...(rA?.frames || {}), ...(rB?.frames || {}) } };
       }
     }
 
-    // Retry 2: sparse fallback — every other frame
     if (!result) {
-      console.warn(`[reframer] chunk ${ci + 1}/${chunks.length} still failing — trying sparse (every 2nd frame)`);
-      const sparse = chunk.filter((_, i) => i % 2 === 0);
-      const rSparse = await _runPythonChunk(videoPath, sparse);
-      if (rSparse) {
-        result = {};
-        for (let i = 0; i < chunk.length; i++) {
-          const t = chunk[i];
-          const nearestSparseT = sparse[Math.min(Math.floor(i / 2), sparse.length - 1)];
-          result[String(t)] = rSparse[String(nearestSparseT)] || { faces: [], sceneChange: false };
-        }
-      }
+      for (const t of chunk) merged[String(t)] = [];
+    } else {
+      Object.assign(merged, result.frames);
     }
-
-    // Final fallback: empty entries for this chunk
-    if (!result) {
-      console.warn(`[reframer] chunk ${ci + 1}/${chunks.length} completely failed — passthrough for this range`);
-      result = {};
-      for (const t of chunk) Object.assign(result, EMPTY(t));
-    }
-
-    Object.assign(merged, result);
   }
-
   return merged;
 }
 
-// ─── Face Identity Tracker ────────────────────────────────────────────────────
-// Tracks faces across frames using IoU + proximity.
-// Returns consistent face IDs across time so a face drifting slightly
-// never flips between "face" and "split" modes.
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function _isFaceMode(mode) {
+  return mode === "face" || mode === "face_left" || mode === "face_right";
+}
+function _normMode(mode) {
+  return _isFaceMode(mode) ? "face" : mode;
+}
 
-class FaceTracker {
-  constructor() {
-    this.tracks = []; // { id, cx, cy, w, h, lastSeen }
-    this.nextId = 1;
+// ─── Grid layout classifier ───────────────────────────────────────────────────
+/**
+ * Grid (→ blur_overlay): faces stacked in rows (cy std-dev HIGH) AND spread
+ *   across columns (cx range HIGH) — Zoom-style 2×2 or N×M grid.
+ * Panel (→ split): all faces at roughly the same height (cy std-dev LOW),
+ *   spread left-right — in-person round-table or interview.
+ */
+function classifyMultiFaceLayout(faces) {
+  if (faces.length < 3) return "panel";
+
+  const cxValues = faces.map(f => f.cx);
+  const cyValues = faces.map(f => f.cy);
+  const cyMean   = cyValues.reduce((s, v) => s + v, 0) / cyValues.length;
+  const cyStdDev = Math.sqrt(
+    cyValues.reduce((s, v) => s + (v - cyMean) ** 2, 0) / cyValues.length
+  );
+  const cxRange  = Math.max(...cxValues) - Math.min(...cxValues);
+
+  if (cyStdDev >= GRID_CY_STDDEV_THRESH && cxRange >= GRID_CX_SPREAD_THRESH) {
+    return "grid";
+  }
+  return "panel";
+}
+
+// ─── Per-frame classifier ─────────────────────────────────────────────────────
+function classifyFrame(trackedFaces, sceneChange = false) {
+  const faces = trackedFaces || [];
+  if (!faces.length) return { mode: "passthrough", sceneChange };
+
+  const significant = faces.filter(
+    f => f.area >= FACE_MIN_AREA && (f.conf === undefined || f.conf >= 0.25)
+  );
+  if (!significant.length) return { mode: "passthrough", sceneChange };
+
+  const sorted = [...significant].sort((a, b) => b.area - a.area);
+
+  // Single dominant face
+  if (
+    sorted.length === 1 ||
+    sorted[1].area / sorted[0].area < SECOND_FACE_TINY_RATIO
+  ) {
+    return {
+      mode: "face",
+      faceCxNorm: sorted[0].cx, faceCyNorm: sorted[0].cy,
+      faceId: sorted[0].id, sceneChange,
+    };
   }
 
+  // 3+ faces — grid vs panel
+  if (sorted.length >= 3) {
+    const layoutType = classifyMultiFaceLayout(sorted);
+
+    if (layoutType === "grid") {
+      return { mode: "blur_overlay", sceneChange };
+    }
+
+    // In-person panel — use outermost two faces for split
+    const leftMost  = [...sorted].sort((a, b) => a.cx - b.cx)[0];
+    const rightMost = [...sorted].sort((a, b) => b.cx - a.cx)[0];
+    const cxDiff    = rightMost.cx - leftMost.cx;
+    const cyDiff    = Math.abs(leftMost.cy - rightMost.cy);
+    const areaRatio = Math.min(leftMost.area, rightMost.area) /
+                      Math.max(leftMost.area, rightMost.area);
+
+    if (
+      cxDiff    >= SPLIT_MIN_CX_DIFF   &&
+      cyDiff    <= SPLIT_MAX_CY_DIFF   &&
+      areaRatio >= SPLIT_MIN_AREA_RATIO * 0.7
+    ) {
+      return {
+        mode:         "split",
+        leftCxNorm:   leftMost.cx,  leftCyNorm:  leftMost.cy,
+        rightCxNorm:  rightMost.cx, rightCyNorm: rightMost.cy,
+        isWideLayout: cxDiff >= SPLIT_WIDE_LAYOUT_CX_DIFF,
+        sceneChange,
+      };
+    }
+
+    // Panel too tight for split → dominant face
+    return {
+      mode: "face",
+      faceCxNorm: sorted[0].cx, faceCyNorm: sorted[0].cy,
+      faceId: sorted[0].id, sceneChange,
+    };
+  }
+
+  // Exactly 2 significant faces
+  const left  = sorted[0].cx <= sorted[1].cx ? sorted[0] : sorted[1];
+  const right  = sorted[0].cx <= sorted[1].cx ? sorted[1] : sorted[0];
+  const cxDiff    = right.cx - left.cx;
+  const cyDiff    = Math.abs(left.cy - right.cy);
+  const areaRatio = Math.min(left.area, right.area) / Math.max(left.area, right.area);
+
+  if (
+    left.area  >= SPLIT_MIN_FACE_AREA &&
+    right.area >= SPLIT_MIN_FACE_AREA &&
+    cxDiff     >= SPLIT_MIN_CX_DIFF   &&
+    cyDiff     <= SPLIT_MAX_CY_DIFF   &&
+    areaRatio  >= SPLIT_MIN_AREA_RATIO
+  ) {
+    return {
+      mode:         "split",
+      leftCxNorm:   left.cx,  leftCyNorm:  left.cy,  leftId:  left.id,
+      rightCxNorm:  right.cx, rightCyNorm: right.cy, rightId: right.id,
+      isWideLayout: cxDiff >= SPLIT_WIDE_LAYOUT_CX_DIFF,
+      sceneChange,
+    };
+  }
+
+  // 2 faces but not a clean split → focus dominant speaker
+  const primary   = sorted[0];
+  const secondary = sorted[1];
+  return {
+    mode:        primary.cx < secondary.cx ? "face_left" : "face_right",
+    faceCxNorm:  primary.cx,   faceCyNorm:  primary.cy,   faceId:    primary.id,
+    otherCxNorm: secondary.cx, otherCyNorm: secondary.cy, otherId:   secondary.id,
+    sceneChange,
+  };
+}
+
+// ─── Face Identity Tracker ────────────────────────────────────────────────────
+class FaceTracker {
+  constructor() { this.tracks = []; this.nextId = 1; }
+
   _iou(a, b) {
-    const ax1 = a.cx - a.w / 2, ay1 = a.cy - a.h / 2;
-    const ax2 = a.cx + a.w / 2, ay2 = a.cy + a.h / 2;
-    const bx1 = b.cx - b.w / 2, by1 = b.cy - b.h / 2;
-    const bx2 = b.cx + b.w / 2, by2 = b.cy + b.h / 2;
+    const ax1 = a.cx - a.w / 2, ay1 = a.cy - a.h / 2,
+          ax2 = a.cx + a.w / 2, ay2 = a.cy + a.h / 2;
+    const bx1 = b.cx - b.w / 2, by1 = b.cy - b.h / 2,
+          bx2 = b.cx + b.w / 2, by2 = b.cy + b.h / 2;
     const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
     const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
     if (ix2 <= ix1 || iy2 <= iy1) return 0;
     const inter = (ix2 - ix1) * (iy2 - iy1);
-    const aArea = (ax2 - ax1) * (ay2 - ay1);
-    const bArea = (bx2 - bx1) * (by2 - by1);
-    return inter / (aArea + bArea - inter);
+    return inter / ((ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter);
   }
 
   update(faces, t) {
-    const matched = new Set();
-    const result  = [];
-
+    const matched = new Set(), result = [];
     for (const face of faces) {
       let bestId = null, bestScore = 0;
-
       for (const track of this.tracks) {
         if (matched.has(track.id)) continue;
-        const iou  = this._iou(face, track);
-        const dist = Math.hypot(face.cx - track.cx, face.cy - track.cy);
+        const iou   = this._iou(face, track);
+        const dist  = Math.hypot(face.cx - track.cx, face.cy - track.cy);
         const score = iou > 0 ? iou : Math.max(0, 1 - dist / 0.3);
         if (score > bestScore && score > 0.15) { bestScore = score; bestId = track.id; }
       }
-
       if (bestId !== null) {
-        const track = this.tracks.find(tr => tr.id === bestId);
-        track.cx = track.cx * 0.6 + face.cx * 0.4;
-        track.cy = track.cy * 0.6 + face.cy * 0.4;
-        track.w  = track.w  * 0.6 + face.w  * 0.4;
-        track.h  = track.h  * 0.6 + face.h  * 0.4;
-        track.lastSeen = t;
+        const tr = this.tracks.find(r => r.id === bestId);
+        tr.cx = tr.cx * 0.6 + face.cx * 0.4;
+        tr.cy = tr.cy * 0.6 + face.cy * 0.4;
+        tr.w  = tr.w  * 0.6 + face.w  * 0.4;
+        tr.h  = tr.h  * 0.6 + face.h  * 0.4;
+        tr.lastSeen = t;
         matched.add(bestId);
         result.push({ ...face, id: bestId });
       } else {
         const newId = this.nextId++;
-        this.tracks.push({ id: newId, cx: face.cx, cy: face.cy, w: face.w, h: face.h, lastSeen: t });
+        this.tracks.push({
+          id: newId, cx: face.cx, cy: face.cy,
+          w: face.w, h: face.h, lastSeen: t,
+        });
         matched.add(newId);
         result.push({ ...face, id: newId });
       }
     }
-
-    // Prune stale tracks (not seen for more than 5 seconds)
     this.tracks = this.tracks.filter(tr => t - tr.lastSeen < 5.0);
     return result;
   }
 }
 
-// ─── Helper: is this a face-family mode? ─────────────────────────────────────
-function _isFaceMode(mode) {
-  return mode === "face" || mode === "face_left" || mode === "face_right";
-}
+// ─── Core: single-pass segment builder ───────────────────────────────────────
+/**
+ * Given a map of { timestamp → [faces] }, classify each frame and group
+ * consecutive frames with the same normalised mode into segments.
+ *
+ * A boundary is only committed when BOUNDARY_CONFIRM_FRAMES consecutive
+ * frames all agree on the new mode (prevents noise from one bad frame
+ * creating a fake boundary).
+ *
+ * Returns: [{ start, end, frames: [{t, decision}] }]
+ */
+function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
+  const tracker = new FaceTracker();
 
-// ─── Per-frame layout classifier ──────────────────────────────────────────────
-// Takes tracked faces (with IDs) and an optional sceneChange flag,
-// returns a raw layout decision.
-//
-// Modes:
-//   face          — one dominant speaker, position unknown relative to others
-//   face_left     — speaker is the left person of a 2-person frame
-//   face_right    — speaker is the right person of a 2-person frame
-//   split         — clean side-by-side, both people shown in split panels
-//   blur_overlay  — 3+ faces, crowd/panel — fit-in-frame with blurred BG
-//   passthrough   — no usable faces detected
-//
-// face_left / face_right are produced when exactly 2 faces are detected but
-// they don't qualify as a clean split (e.g. one is much larger / they're too
-// close together). The directional label lets clipCutter produce editorial
-// "cut to speaker" moments rather than always defaulting to the biggest face.
+  // 1. Classify every sampled frame
+  const classified = sampleTimes.map(t => {
+    const rawFaces = faceFrames[String(t)] || [];
+    const tracked  = tracker.update(rawFaces, t);
+    const decision = classifyFrame(tracked, false);
+    return { t, decision, normMode: _normMode(decision.mode) };
+  });
 
-function classifyFrame(trackedFaces, sceneChange = false) {
-  const faces = trackedFaces || [];
+  if (!classified.length) return [];
 
-  if (faces.length === 0) {
-    return { mode: "passthrough", sceneChange };
-  }
+  // 2. Segment with confirmation window
+  const segments = [];
+  let   segStart = 0; // index into classified
 
-  const significant = faces.filter(f =>
-    f.area >= FACE_MIN_AREA && (f.conf === undefined || f.conf >= 0.40)
-  );
+  let i = 0;
+  while (i < classified.length) {
+    const currentMode = classified[segStart].normMode;
 
-  if (significant.length === 0) {
-    return { mode: "passthrough", sceneChange };
-  }
-
-  const sorted = [...significant].sort((a, b) => b.area - a.area);
-
-  // Single significant face — or second face is tiny relative to first
-  if (sorted.length === 1 || (sorted.length >= 2 && sorted[1].area / sorted[0].area < 0.12)) {
-    return {
-      mode:       "face",
-      faceCxNorm: sorted[0].cx,
-      faceCyNorm: sorted[0].cy,
-      faceId:     sorted[0].id,
-      sceneChange,
-    };
-  }
-
-  // 3+ significant faces → blur overlay (crowd/panel scene)
-  if (sorted.length >= 3) {
-    return { mode: "blur_overlay", sceneChange };
-  }
-
-  // Exactly 2 significant faces — test split criteria
-  const left  = sorted[0].cx < sorted[1].cx ? sorted[0] : sorted[1];
-  const right = sorted[0].cx < sorted[1].cx ? sorted[1] : sorted[0];
-
-  const cxDiff    = right.cx - left.cx;
-  const cyDiff    = Math.abs(left.cy - right.cy);
-  const areaRatio = Math.min(left.area, right.area) / Math.max(left.area, right.area);
-
-  const bothBigEnough = left.area  >= SPLIT_MIN_FACE_AREA && right.area >= SPLIT_MIN_FACE_AREA;
-  const wideEnough    = cxDiff     >= SPLIT_MIN_CX_DIFF;
-  const notStacked    = cyDiff     <= SPLIT_MAX_CY_DIFF;
-  const similarSize   = areaRatio  >= SPLIT_MIN_AREA_RATIO;
-
-  if (bothBigEnough && wideEnough && notStacked && similarSize) {
-    // Wide-layout flag: faces are very far apart (e.g. 2-left / 2-right panel).
-    // clipCutter uses SPLIT_ZOOM_WIDE (1.05) instead of SPLIT_ZOOM (1.15) for
-    // these so edge speakers are never cropped out.
-    const isWideLayout = cxDiff >= SPLIT_WIDE_LAYOUT_CX_DIFF;
-
-    return {
-      mode:         "split",
-      leftCxNorm:   left.cx,
-      leftCyNorm:   left.cy,
-      leftId:       left.id,
-      rightCxNorm:  right.cx,
-      rightCyNorm:  right.cy,
-      rightId:      right.id,
-      isWideLayout,
-      sceneChange,
-    };
-  }
-
-  // 2 faces that are NOT a clean side-by-side split.
-  // Return face_left or face_right so clipCutter can produce intentional
-  // "cut to speaker" moments when the timeline switches between them.
-  const primary   = sorted[0]; // largest = presumed speaker
-  const secondary = sorted[1];
-  const faceMode  = primary.cx < secondary.cx ? "face_left" : "face_right";
-
-  return {
-    mode:        faceMode,
-    faceCxNorm:  primary.cx,
-    faceCyNorm:  primary.cy,
-    faceId:      primary.id,
-    otherCxNorm: secondary.cx,
-    otherCyNorm: secondary.cy,
-    otherId:     secondary.id,
-    sceneChange,
-  };
-}
-
-// ─── Global vote: decide the DOMINANT layout for the whole clip ───────────────
-// face_left and face_right are merged into "face" for dominant-mode comparison
-// but tracked separately in rawVotes for diagnostic logging.
-// Scene-change frames count as 0.3 votes (real but uncertain).
-
-function globalVote(rawFrames) {
-  const rawVotes   = { face: 0, face_left: 0, face_right: 0, split: 0, blur_overlay: 0, passthrough: 0 };
-  const facePositions  = [];
-  const splitPositions = [];
-
-  for (const frame of rawFrames) {
-    const mode   = frame.decision.mode;
-    const weight = frame.decision.sceneChange === true ? 0.3 : 1.0;
-
-    rawVotes[mode] = (rawVotes[mode] || 0) + weight;
-
-    if (_isFaceMode(mode)) {
-      facePositions.push({ cx: frame.decision.faceCxNorm, cy: frame.decision.faceCyNorm });
+    // Find where mode first flips
+    let flipIdx = i;
+    while (flipIdx < classified.length && classified[flipIdx].normMode === currentMode) {
+      flipIdx++;
     }
-    if (mode === "split") {
-      splitPositions.push({
-        lcx: frame.decision.leftCxNorm,
-        rcx: frame.decision.rightCxNorm,
-        lcy: frame.decision.leftCyNorm,
-        rcy: frame.decision.rightCyNorm,
-        wide: frame.decision.isWideLayout === true,
-      });
+
+    if (flipIdx >= classified.length) {
+      // No flip found — rest of clip is same mode
+      segments.push({ startIdx: segStart, endIdx: classified.length - 1 });
+      break;
+    }
+
+    // Check if flip holds for BOUNDARY_CONFIRM_FRAMES
+    const confirmEnd = Math.min(flipIdx + BOUNDARY_CONFIRM_FRAMES, classified.length);
+    const newMode    = classified[flipIdx].normMode;
+    const confirmed  = classified.slice(flipIdx, confirmEnd)
+      .every(f => f.normMode === newMode);
+
+    if (confirmed) {
+      segments.push({ startIdx: segStart, endIdx: flipIdx - 1 });
+      segStart = flipIdx;
+      i        = flipIdx;
+    } else {
+      // Noise — skip past this blip and keep looking from flipIdx+1
+      i = flipIdx + 1;
     }
   }
 
-  // Merge face variants for dominant-mode decision
-  const mergedVotes = {
-    face:         (rawVotes.face || 0) + (rawVotes.face_left || 0) + (rawVotes.face_right || 0),
-    split:        rawVotes.split        || 0,
-    blur_overlay: rawVotes.blur_overlay || 0,
-    passthrough:  rawVotes.passthrough  || 0,
-  };
+  // 3. For each segment: vote from its own frames, average positions
+  return segments.map(seg => {
+    const frames = classified.slice(seg.startIdx, seg.endIdx + 1);
+    const votes  = { face: 0, split: 0, blur_overlay: 0, passthrough: 0 };
+    const splitPos = [], facePos = [];
 
-  const total        = Object.values(mergedVotes).reduce((s, v) => s + v, 0) || 1;
-  const dominant     = Object.entries(mergedVotes).sort((a, b) => b[1] - a[1])[0];
-  const dominantMode = dominant[0];
-  const dominantFrac = dominant[1] / total;
+    for (const f of frames) {
+      const m = _normMode(f.decision.mode);
+      votes[m] = (votes[m] || 0) + 1;
+      if (m === "face") {
+        facePos.push({ cx: f.decision.faceCxNorm ?? 0.5, cy: f.decision.faceCyNorm ?? 0.4 });
+      }
+      if (m === "split") {
+        splitPos.push({
+          lcx: f.decision.leftCxNorm  ?? 0.25,
+          lcy: f.decision.leftCyNorm  ?? 0.4,
+          rcx: f.decision.rightCxNorm ?? 0.75,
+          rcy: f.decision.rightCyNorm ?? 0.4,
+          wide: f.decision.isWideLayout === true,
+        });
+      }
+    }
 
-  const avg = (arr, key) => arr.length ? arr.reduce((s, p) => s + p[key], 0) / arr.length : undefined;
+    const total     = Object.values(votes).reduce((s, v) => s + v, 0) || 1;
+    const [winMode] = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+    const winFrac   = votes[winMode] / total;
+    const avg       = (arr, key) =>
+      arr.length ? arr.reduce((s, p) => s + p[key], 0) / arr.length : null;
 
-  // Wide-layout majority vote across all split frames
-  const avgSplitWide = splitPositions.length > 0
-    && splitPositions.filter(p => p.wide).length / splitPositions.length >= 0.5;
+    let decision;
+    if (winMode === "split" && splitPos.length) {
+      decision = {
+        mode:         "split",
+        leftCxNorm:   avg(splitPos, "lcx") ?? 0.25,
+        leftCyNorm:   avg(splitPos, "lcy") ?? 0.4,
+        rightCxNorm:  avg(splitPos, "rcx") ?? 0.75,
+        rightCyNorm:  avg(splitPos, "rcy") ?? 0.4,
+        isWideLayout: splitPos.filter(p => p.wide).length / splitPos.length >= 0.5,
+      };
+    } else if (winMode === "face" && facePos.length) {
+      decision = {
+        mode:       "face",
+        faceCxNorm: avg(facePos, "cx") ?? 0.5,
+        faceCyNorm: avg(facePos, "cy") ?? 0.4,
+      };
+    } else if (winMode === "blur_overlay") {
+      decision = { mode: "blur_overlay" };
+    } else {
+      decision = { mode: "passthrough" };
+    }
 
-  return {
-    dominantMode,
-    dominantFrac,
-    votes:        mergedVotes,
-    rawVotes,
-    avgFaceCx:    avg(facePositions, "cx")   ?? 0.5,
-    avgFaceCy:    avg(facePositions, "cy")   ?? 0.4,
-    avgSplitLcx:  avg(splitPositions, "lcx") ?? 0.25,
-    avgSplitRcx:  avg(splitPositions, "rcx") ?? 0.75,
-    avgSplitLcy:  avg(splitPositions, "lcy") ?? 0.4,
-    avgSplitRcy:  avg(splitPositions, "rcy") ?? 0.4,
-    avgSplitWide,
-  };
+    const startT = frames[0].t;
+    const endT   = frames[frames.length - 1].t;
+
+    console.log(
+      `[reframer/seg] ${startT.toFixed(1)}→${endT.toFixed(1)}s: ` +
+      `votes=${JSON.stringify(votes)} → ${winMode} (${(winFrac * 100).toFixed(0)}%)`
+    );
+
+    return {
+      start: startT,
+      end:   endT,
+      decision,
+      votes,
+      winFrac,
+    };
+  });
 }
 
-// ─── Timeline smoother with hysteresis ────────────────────────────────────────
-// Pass 1: Remove any run shorter than MIN_HOLD_SECS by merging into neighbors.
-// Pass 2: Face position smoothing (sliding median on cx/cy).
-// Pass 3: Split position smoothing.
-// face / face_left / face_right are treated as the same "family" in Pass 1
-// so a face_left→face_right switch that lasts <MIN_HOLD_SECS is suppressed,
-// but a face_left→split switch is NOT suppressed (different families).
+// ─── Merge short segments ─────────────────────────────────────────────────────
+function mergeShortSegments(segments, minSecs) {
+  if (segments.length <= 1) return segments;
 
-function smoothTimeline(rawTimeline, globalStats) {
-  if (rawTimeline.length === 0) return [];
-
-  let result = rawTimeline.map(e => ({ ...e }));
-
-  // ── Pass 1: Duration-based run smoothing ─────────────────────────────────────
   let changed = true;
-  let passes  = 0;
-  while (changed && passes < 15) {
-    changed = false;
-    passes++;
+  let segs    = segments.map(s => ({ ...s }));
 
+  while (changed) {
+    changed = false;
+    const out = [];
+    for (let i = 0; i < segs.length; i++) {
+      const dur = segs[i].end - segs[i].start;
+      if (dur < minSecs && segs.length > 1) {
+        // Merge into previous if it exists, else next
+        if (out.length > 0) {
+          out[out.length - 1].end = segs[i].end;
+          changed = true;
+        } else if (i + 1 < segs.length) {
+          segs[i + 1] = { ...segs[i + 1], start: segs[i].start };
+          changed = true;
+        }
+        // (drop segs[i] by not pushing it)
+      } else {
+        out.push({ ...segs[i] });
+      }
+    }
+    segs = out;
+  }
+  return segs;
+}
+
+// ─── Expand segment decisions → per-second timeline ──────────────────────────
+function expandToTimeline(segments, clipStartSec, clipEndSec) {
+  const timeline = [];
+  for (const seg of segments) {
+    let t = seg.start;
+    while (t <= seg.end + 0.01 && t < clipEndSec + 0.01) {
+      timeline.push({
+        videoTimeSec: parseFloat(t.toFixed(2)),
+        clipTimeSec:  parseFloat((t - clipStartSec).toFixed(2)),
+        faceCount:    seg.decision.mode === "passthrough" ? 0 : 1,
+        decision:     seg.decision,
+      });
+      t += 1.0;
+    }
+  }
+  // Ensure at least one entry
+  if (!timeline.length && segments.length) {
+    const seg = segments[0];
+    timeline.push({
+      videoTimeSec: seg.start,
+      clipTimeSec:  parseFloat((seg.start - clipStartSec).toFixed(2)),
+      faceCount:    0,
+      decision:     seg.decision,
+    });
+  }
+  return timeline;
+}
+
+// ─── Timeline smoother ────────────────────────────────────────────────────────
+// Absorbs single-frame blips shorter than MIN_HOLD_SECS that slipped through
+// the confirmation window (edge case near clip boundaries).
+function smoothTimeline(rawTimeline) {
+  if (!rawTimeline.length) return [];
+  let result  = rawTimeline.map(e => ({ ...e }));
+  let changed = true, passes = 0;
+
+  while (changed && passes < 10) {
+    changed = false; passes++;
     let i = 0;
     while (i < result.length) {
       const runMode = result[i].decision.mode;
@@ -623,34 +767,21 @@ function smoothTimeline(rawTimeline, globalStats) {
         let replacement = prevRun || nextRun;
 
         if (prevRun && nextRun) {
-          let prevRunLen = 0;
-          for (let k = i - 1; k >= 0 && result[k].decision.mode === prevRun.mode; k--) prevRunLen++;
-          let nextRunLen = 0;
-          for (let k = j; k < result.length && result[k].decision.mode === nextRun.mode; k++) nextRunLen++;
-          replacement = nextRunLen >= prevRunLen ? nextRun : prevRun;
+          // Pick whichever neighbour run is longer
+          let pLen = 0, nLen = 0;
+          for (let k = i - 1; k >= 0 && result[k].decision.mode === prevRun.mode; k--) pLen++;
+          for (let k = j; k < result.length && result[k].decision.mode === nextRun.mode; k++) nLen++;
+          replacement = nLen >= pLen ? nextRun : prevRun;
         }
 
-        // Never suppress a real split run if split has significant global presence.
-        const splitGlobalFrac = globalStats?.votes
-          ? (globalStats.votes.split || 0) / (rawTimeline.length || 1)
-          : 0;
-        if (runMode === "split" && splitGlobalFrac >= 0.20 && replacement && _isFaceMode(replacement.mode)) {
-          i = j;
-          continue;
-        }
-
-        // Never merge face_left→face_right or face_right→face_left into a
-        // neighbor if the neighbor is from the OTHER direction — those are
-        // intentional speaker-switch cuts, not noise.
-        if (_isFaceMode(runMode) && replacement && _isFaceMode(replacement.mode)) {
-          // Only suppress if directions match (or both are plain "face")
-          const sameDir = runMode === replacement.mode
-            || runMode === "face"
-            || replacement.mode === "face";
-          if (!sameDir) {
-            i = j;
-            continue;
-          }
+        // Don't absorb a confirmed split blip back into face
+        const splitFrac = (result.filter(e => e.decision.mode === "split").length) /
+                          (result.length || 1);
+        if (
+          runMode === "split" && splitFrac >= 0.08 &&
+          replacement && _isFaceMode(replacement.mode)
+        ) {
+          i = j; continue;
         }
 
         if (replacement) {
@@ -660,84 +791,139 @@ function smoothTimeline(rawTimeline, globalStats) {
           changed = true;
         }
       }
-
       i = j;
     }
   }
 
-  // ── Pass 2: Face position smoothing ──────────────────────────────────────────
-  const SMOOTH_WIN = 3;
-  const half = Math.floor(SMOOTH_WIN / 2);
-
+  // Face + split position smoothing (sliding median, window=3)
+  const HALF = 1;
   for (let i = 0; i < result.length; i++) {
-    if (!_isFaceMode(result[i].decision.mode)) continue;
-
-    const cxWindow = [], cyWindow = [];
-    for (let k = Math.max(0, i - half); k <= Math.min(result.length - 1, i + half); k++) {
-      if (_isFaceMode(result[k].decision.mode)) {
-        cxWindow.push(result[k].decision.faceCxNorm ?? 0.5);
-        cyWindow.push(result[k].decision.faceCyNorm ?? 0.4);
+    if (_isFaceMode(result[i].decision.mode)) {
+      const cxW = [], cyW = [];
+      for (let k = Math.max(0, i - HALF); k <= Math.min(result.length - 1, i + HALF); k++) {
+        if (_isFaceMode(result[k].decision.mode)) {
+          cxW.push(result[k].decision.faceCxNorm ?? 0.5);
+          cyW.push(result[k].decision.faceCyNorm ?? 0.4);
+        }
+      }
+      if (cxW.length) {
+        cxW.sort((a, b) => a - b); cyW.sort((a, b) => a - b);
+        const m = Math.floor(cxW.length / 2);
+        result[i] = {
+          ...result[i],
+          decision: { ...result[i].decision, faceCxNorm: cxW[m], faceCyNorm: cyW[m] },
+        };
       }
     }
-
-    if (cxWindow.length > 0) {
-      cxWindow.sort((a, b) => a - b);
-      cyWindow.sort((a, b) => a - b);
-      const mid = Math.floor(cxWindow.length / 2);
-      result[i] = {
-        ...result[i],
-        decision: {
-          ...result[i].decision,
-          faceCxNorm: cxWindow[mid],
-          faceCyNorm: cyWindow[mid],
-        },
-      };
-    }
-  }
-
-  // ── Pass 3: Split position smoothing ─────────────────────────────────────────
-  for (let i = 0; i < result.length; i++) {
-    if (result[i].decision.mode !== "split") continue;
-
-    const lcxWindow = [], rcxWindow = [];
-    for (let k = Math.max(0, i - half); k <= Math.min(result.length - 1, i + half); k++) {
-      if (result[k].decision.mode === "split") {
-        lcxWindow.push(result[k].decision.leftCxNorm  ?? 0.25);
-        rcxWindow.push(result[k].decision.rightCxNorm ?? 0.75);
+    if (result[i].decision.mode === "split") {
+      const lcxW = [], rcxW = [];
+      for (let k = Math.max(0, i - HALF); k <= Math.min(result.length - 1, i + HALF); k++) {
+        if (result[k].decision.mode === "split") {
+          lcxW.push(result[k].decision.leftCxNorm  ?? 0.25);
+          rcxW.push(result[k].decision.rightCxNorm ?? 0.75);
+        }
+      }
+      if (lcxW.length) {
+        lcxW.sort((a, b) => a - b); rcxW.sort((a, b) => a - b);
+        const m = Math.floor(lcxW.length / 2);
+        result[i] = {
+          ...result[i],
+          decision: { ...result[i].decision, leftCxNorm: lcxW[m], rightCxNorm: rcxW[m] },
+        };
       }
     }
-
-    if (lcxWindow.length > 0) {
-      lcxWindow.sort((a, b) => a - b);
-      rcxWindow.sort((a, b) => a - b);
-      const mid = Math.floor(lcxWindow.length / 2);
-      result[i] = {
-        ...result[i],
-        decision: {
-          ...result[i].decision,
-          leftCxNorm:  lcxWindow[mid],
-          rightCxNorm: rcxWindow[mid],
-        },
-      };
-    }
   }
-
   return result;
 }
 
+// ─── Variety injection ────────────────────────────────────────────────────────
+/**
+ * For long blur_overlay or split segments, periodically injects face-focus
+ * shots (left / right / center) so the clip doesn't feel static.
+ *
+ * blur_overlay cycle: face_left → face_right → face_center
+ * split cycle:        face_left → face_right
+ */
+function injectVariety(timeline) {
+  if (!timeline.length) return timeline;
+  const result = timeline.map(e => ({ ...e }));
+
+  let i = 0;
+  while (i < result.length) {
+    const baseMode = result[i].decision.mode;
+    if (baseMode !== "blur_overlay" && baseMode !== "split") { i++; continue; }
+
+    // Find run extent
+    let j = i;
+    while (j < result.length && result[j].decision.mode === baseMode) j++;
+
+    const runStart = result[i].clipTimeSec;
+    const runEnd   = j < result.length
+      ? result[j].clipTimeSec
+      : (result[result.length - 1].clipTimeSec + 1);
+    const runDur   = runEnd - runStart;
+
+    if (runDur >= VARIETY_MIN_SECS) {
+      const baseDec      = result[i].decision;
+      const focusVariants = _buildFocusVariants(baseMode, baseDec);
+
+      if (focusVariants.length) {
+        let variantIdx = 0;
+        let nextInject = runStart + VARIETY_INTERVAL_SECS;
+
+        for (let k = i; k < j; k++) {
+          const ct = result[k].clipTimeSec;
+          if (ct >= nextInject && ct + VARIETY_HOLD_SECS <= runEnd) {
+            for (let m = k; m < j && result[m].clipTimeSec < ct + VARIETY_HOLD_SECS; m++) {
+              result[m] = { ...result[m], decision: { ...focusVariants[variantIdx] } };
+            }
+            variantIdx = (variantIdx + 1) % focusVariants.length;
+            nextInject = ct + VARIETY_HOLD_SECS + VARIETY_INTERVAL_SECS;
+          }
+        }
+
+        console.log(
+          `[reframer/variety] injected into ${baseMode} ` +
+          `${runStart.toFixed(1)}→${runEnd.toFixed(1)}s (${runDur.toFixed(0)}s)`
+        );
+      }
+    }
+    i = j;
+  }
+  return result;
+}
+
+function _buildFocusVariants(baseMode, baseDec) {
+  if (baseMode === "split") {
+    return [
+      { mode: "face_left",  faceCxNorm: baseDec.leftCxNorm  ?? 0.25, faceCyNorm: baseDec.leftCyNorm  ?? 0.4 },
+      { mode: "face_right", faceCxNorm: baseDec.rightCxNorm ?? 0.75, faceCyNorm: baseDec.rightCyNorm ?? 0.4 },
+    ];
+  }
+  if (baseMode === "blur_overlay") {
+    return [
+      { mode: "face_left",   faceCxNorm: 0.25, faceCyNorm: 0.38 },
+      { mode: "face_right",  faceCxNorm: 0.75, faceCyNorm: 0.38 },
+      { mode: "face",        faceCxNorm: 0.50, faceCyNorm: 0.38 },
+    ];
+  }
+  return [];
+}
+
 // ─── MAIN EXPORT: analyzeClipTimeline ────────────────────────────────────────
+/**
+ * Scans a clip segment [startSec, endSec] of videoPath.
+ * Returns { timeline, srcW, srcH, isAlreadyVertical }
+ */
 async function analyzeClipTimeline(videoPath, startSec, endSec) {
-  // 1. Probe video dimensions
   let info;
-  try {
-    info = await probe(videoPath);
-  } catch (e) {
+  try { info = await probe(videoPath); }
+  catch (e) {
     console.warn("[reframer] probe failed:", e.message);
     return { timeline: [], srcW: 1920, srcH: 1080, isAlreadyVertical: false };
   }
 
-  const isAlreadyVertical = info.w / info.h < 0.75;
-  if (isAlreadyVertical) {
+  if (info.w / info.h < 0.75) {
     console.log("[reframer] already vertical → passthrough");
     return { timeline: [], srcW: info.w, srcH: info.h, isAlreadyVertical: true };
   }
@@ -747,210 +933,118 @@ async function analyzeClipTimeline(videoPath, startSec, endSec) {
     return { timeline: [], srcW: info.w, srcH: info.h, isAlreadyVertical: false };
   }
 
-  // 2. Build sample times at 1s density across the clip
-  const totalSamples = Math.max(2, Math.ceil(clipDur / SAMPLE_INTERVAL));
+  const interval = clipDur <= DENSE_SCAN_MAX_SECS
+    ? SCAN_INTERVAL_SHORT
+    : SCAN_INTERVAL_LONG;
+
+  const totalSamples = Math.max(2, Math.ceil(clipDur / interval));
   const sampleTimes  = Array.from({ length: totalSamples }, (_, i) =>
     parseFloat((startSec + (i * clipDur) / (totalSamples - 1 || 1)).toFixed(2))
   );
 
-  console.log(`[reframer] scanning ${sampleTimes.length} frames for clip ${startSec.toFixed(1)}s→${endSec.toFixed(1)}s`);
+  console.log(
+    `[reframer] clip ${startSec.toFixed(1)}→${endSec.toFixed(1)}s ` +
+    `(${clipDur.toFixed(1)}s) — single-pass YOLO @ ${interval}s interval, ` +
+    `${sampleTimes.length} samples`
+  );
 
-  // 3. Run YOLO face detection
   const faceFrames = await detectFaces(videoPath, sampleTimes);
-  if (!faceFrames) {
+
+  // Build segments with per-segment voting
+  let segments = buildSegmentsFromFrames(sampleTimes, faceFrames, startSec);
+
+  if (!segments.length) {
     return { timeline: [], srcW: info.w, srcH: info.h, isAlreadyVertical: false };
   }
 
-  // 4. Assign stable face IDs via tracker and unpack scene-change flag
-  const tracker      = new FaceTracker();
-  const trackedFrames = sampleTimes.map(t => {
-    const frameData  = faceFrames[String(t)] || { faces: [], sceneChange: false };
-    const rawFaces   = Array.isArray(frameData) ? frameData : frameData.faces;
-    const sceneChg   = Array.isArray(frameData) ? false : (frameData.sceneChange === true);
-    const tracked    = tracker.update(rawFaces, t);
-    return { t, faces: tracked, sceneChange: sceneChg };
-  });
+  // Merge short segments (noise)
+  segments = mergeShortSegments(segments, MIN_SEGMENT_SECS);
 
-  // 5. Classify each frame
-  const rawTimeline = trackedFrames.map(({ t, faces, sceneChange }) => {
-    const clipT = parseFloat((t - startSec).toFixed(2));
-    return {
-      videoTimeSec: t,
-      clipTimeSec:  clipT,
-      faceCount:    faces.length,
-      decision:     classifyFrame(faces, sceneChange),
-    };
-  });
-
-  // 6. Global vote — understand the overall clip structure
-  const gStats = globalVote(rawTimeline);
+  // Log final segment map
   console.log(
-    `[reframer] global vote: ${JSON.stringify(gStats.votes)} rawVotes: ${JSON.stringify(gStats.rawVotes)} | dominant: ${gStats.dominantMode} (${(gStats.dominantFrac * 100).toFixed(0)}%)`
+    `[reframer] ${segments.length} segment(s): ` +
+    segments.map(s =>
+      `${s.start.toFixed(1)}→${s.end.toFixed(1)}s:${s.decision.mode}`
+    ).join(" | ")
   );
 
-  // 7. Smooth the timeline
-  const timeline = smoothTimeline(rawTimeline, gStats);
+  const rawTimeline = expandToTimeline(segments, startSec, endSec);
+  const smoothed    = smoothTimeline(rawTimeline);
+  const timeline    = injectVariety(smoothed);
 
-  // 8. Conservative global override — only replace PASSTHROUGH frames in
-  //    overwhelmingly homogeneous clips (≥90%). Never override face/split
-  //    transitions — those carry real editorial meaning.
-  const OVERRIDE_THRESHOLD = 0.90;
-  if (gStats.dominantFrac >= OVERRIDE_THRESHOLD && gStats.dominantMode !== "passthrough") {
-    let overrideDecision = null;
-
-    if (gStats.dominantMode === "face") {
-      overrideDecision = {
-        mode: "face",
-        faceCxNorm: gStats.avgFaceCx,
-        faceCyNorm: gStats.avgFaceCy,
-      };
-    } else if (gStats.dominantMode === "split") {
-      overrideDecision = {
-        mode:         "split",
-        leftCxNorm:   gStats.avgSplitLcx,
-        leftCyNorm:   gStats.avgSplitLcy,
-        rightCxNorm:  gStats.avgSplitRcx,
-        rightCyNorm:  gStats.avgSplitRcy,
-        isWideLayout: gStats.avgSplitWide,
-      };
-    }
-
-    if (overrideDecision) {
-      let overridden = 0;
-      for (let i = 0; i < timeline.length; i++) {
-        if (timeline[i].decision.mode === "passthrough") {
-          timeline[i] = { ...timeline[i], decision: { ...overrideDecision } };
-          overridden++;
-        }
-      }
-      if (overridden > 0) {
-        console.log(`[reframer] global override: replaced ${overridden} passthrough frame(s) with dominant "${gStats.dominantMode}"`);
-      }
-    }
-  }
-
-  // 9. Log final mode distribution
-  const modeCounts = {};
-  for (const entry of timeline) {
-    modeCounts[entry.decision.mode] = (modeCounts[entry.decision.mode] || 0) + 1;
-  }
-  console.log("[reframer] final timeline modes:", JSON.stringify(modeCounts));
+  const mc = {};
+  for (const e of timeline) mc[e.decision.mode] = (mc[e.decision.mode] || 0) + 1;
+  console.log("[reframer] final modes:", JSON.stringify(mc));
 
   return { timeline, srcW: info.w, srcH: info.h, isAlreadyVertical: false };
 }
 
-// ─── Legacy export (used by older paths that call analyzeSpeakers directly) ───
+// ─── buildFullVideoLayoutMap ──────────────────────────────────────────────────
+async function buildFullVideoLayoutMap(videoPath) {
+  let info;
+  try { info = await probe(videoPath); }
+  catch (e) { console.warn("[reframer/layoutMap] probe failed:", e.message); return []; }
+
+  if (info.w / info.h < 0.75) { console.log("[reframer/layoutMap] already vertical"); return []; }
+  if (info.dur <= 0) return [];
+
+  // For full-video scan, always use the long interval to keep it fast
+  const interval     = SCAN_INTERVAL_LONG;
+  const totalSamples = Math.max(2, Math.ceil(info.dur / interval));
+  const sampleTimes  = Array.from({ length: totalSamples }, (_, i) =>
+    parseFloat((i * info.dur / (totalSamples - 1 || 1)).toFixed(2))
+  );
+
+  console.log(
+    `[reframer/layoutMap] full-video scan: ${info.dur.toFixed(0)}s, ` +
+    `${sampleTimes.length} samples @ ${interval}s`
+  );
+
+  const faceFrames = await detectFaces(videoPath, sampleTimes);
+  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0);
+  segments         = mergeShortSegments(segments, MIN_SEGMENT_SECS);
+
+  const rawTimeline = expandToTimeline(segments, 0, info.dur);
+  const smoothed    = smoothTimeline(rawTimeline);
+  const timeline    = injectVariety(smoothed);
+
+  const mc = {};
+  for (const e of timeline) mc[e.decision.mode] = (mc[e.decision.mode] || 0) + 1;
+  console.log("[reframer/layoutMap] full-video modes:", JSON.stringify(mc));
+  return timeline;
+}
+
+// ─── Legacy: analyzeSpeakers ──────────────────────────────────────────────────
 async function analyzeSpeakers(videoPath) {
   let info;
   try { info = await probe(videoPath); } catch { return { mode: "passthrough" }; }
   if (info.w / info.h < 0.75) return { mode: "passthrough" };
 
-  const totalSamples = Math.min(60, Math.ceil(info.dur / 2.0));
+  const interval     = SCAN_INTERVAL_LONG;
+  const totalSamples = Math.max(2, Math.ceil(info.dur / interval));
   const sampleTimes  = Array.from({ length: totalSamples }, (_, i) =>
-    parseFloat(((i * info.dur) / totalSamples).toFixed(2))
+    parseFloat((i * info.dur / (totalSamples - 1 || 1)).toFixed(2))
   );
 
   const faceFrames = await detectFaces(videoPath, sampleTimes);
-  if (!faceFrames) return { mode: "passthrough" };
+  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0);
+  segments         = mergeShortSegments(segments, MIN_SEGMENT_SECS);
 
-  const tracker      = new FaceTracker();
-  const trackedFrames = sampleTimes.map(t => {
-    const fd     = faceFrames[String(t)] || { faces: [], sceneChange: false };
-    const faces  = Array.isArray(fd) ? fd : fd.faces;
-    const scChg  = Array.isArray(fd) ? false : fd.sceneChange === true;
-    return { t, faces: tracker.update(faces, t), sceneChange: scChg };
-  });
+  let faceDur = 0, splitDur = 0, blurDur = 0, totalDur = 0;
+  let avgFaceCx = 0.5, avgFaceCy = 0.4;
 
-  const rawTimeline = trackedFrames.map(({ t, faces, sceneChange }) => ({
-    videoTimeSec: t,
-    clipTimeSec:  t,
-    faceCount:    faces.length,
-    decision:     classifyFrame(faces, sceneChange),
-  }));
-
-  const gStats = globalVote(rawTimeline);
-
-  if (gStats.dominantMode === "split" && gStats.dominantFrac >= 0.25) {
-    return { mode: "blur_overlay" };
+  for (const seg of segments) {
+    const d   = seg.end - seg.start;
+    totalDur += d;
+    if (seg.decision.mode === "face")         { faceDur  += d; avgFaceCx = seg.decision.faceCxNorm ?? 0.5; avgFaceCy = seg.decision.faceCyNorm ?? 0.4; }
+    else if (seg.decision.mode === "split")   { splitDur += d; }
+    else if (seg.decision.mode === "blur_overlay") { blurDur  += d; }
   }
 
-  if (gStats.dominantMode === "face") {
-    return { mode: "face", faceCxNorm: gStats.avgFaceCx, faceCyNorm: gStats.avgFaceCy };
-  }
-
+  if (blurDur  / totalDur >= 0.20) return { mode: "blur_overlay" };
+  if (splitDur / totalDur >= 0.20) return { mode: "blur_overlay" }; // treat split like overlay for legacy callers
+  if (faceDur  / totalDur >= 0.40) return { mode: "face", faceCxNorm: avgFaceCx, faceCyNorm: avgFaceCy };
   return { mode: "passthrough" };
-}
-
-// ─── Full-video layout scan for clip selection ────────────────────────────────
-/**
- * buildFullVideoLayoutMap
- *
- * Runs a SPARSE YOLO scan across the entire video (3 s intervals, 300 sample
- * cap) and returns a timeline array that clipSelector.buildLayoutMap() can
- * convert to { [integerSec]: mode }.
- *
- * Sparse scan rationale:
- *   - A 2-hour video at 1 s = ~7 200 YOLO calls before any clips are selected.
- *   - At 3 s = ~2 400 calls, capped at 300 = at most 300 calls regardless of length.
- *   - This is enough to see "crowd shot here / two-person split here" for
- *     block-level scoring. The per-clip dense scan (1 s) handles frame rendering.
- */
-async function buildFullVideoLayoutMap(videoPath) {
-  let info;
-  try {
-    info = await probe(videoPath);
-  } catch (e) {
-    console.warn("[reframer/layoutMap] probe failed:", e.message);
-    return [];
-  }
-
-  if (info.w / info.h < 0.75) {
-    console.log("[reframer/layoutMap] already vertical → all-passthrough map");
-    return [];
-  }
-
-  if (info.dur <= 0) return [];
-
-  const maxSamples   = 300;
-  const totalSamples = Math.min(maxSamples, Math.max(2, Math.ceil(info.dur / LAYOUT_MAP_INTERVAL)));
-  const sampleTimes  = Array.from({ length: totalSamples }, (_, i) =>
-    parseFloat(((i * info.dur) / (totalSamples - 1 || 1)).toFixed(2))
-  );
-
-  console.log(`[reframer/layoutMap] sparse scan: ${sampleTimes.length} frames @ ${LAYOUT_MAP_INTERVAL}s intervals across ${info.dur.toFixed(0)}s video`);
-
-  const faceFrames = await detectFaces(videoPath, sampleTimes);
-  if (!faceFrames) {
-    console.warn("[reframer/layoutMap] face detection failed — returning empty map");
-    return [];
-  }
-
-  const tracker      = new FaceTracker();
-  const rawTimeline  = sampleTimes.map(t => {
-    const fd      = faceFrames[String(t)] || { faces: [], sceneChange: false };
-    const faces   = Array.isArray(fd) ? fd : fd.faces;
-    const scChg   = Array.isArray(fd) ? false : fd.sceneChange === true;
-    const tracked = tracker.update(faces, t);
-    return {
-      videoTimeSec: t,
-      clipTimeSec:  t,
-      faceCount:    tracked.length,
-      decision:     classifyFrame(tracked, scChg),
-    };
-  });
-
-  // Light smoothing — collapse short noise runs so a single bad frame doesn't
-  // create an artificial instability spike in clip scoring.
-  const gStats  = globalVote(rawTimeline);
-  const smoothed = smoothTimeline(rawTimeline, gStats);
-
-  const modeCounts = {};
-  for (const e of smoothed) {
-    modeCounts[e.decision.mode] = (modeCounts[e.decision.mode] || 0) + 1;
-  }
-  console.log("[reframer/layoutMap] full-video modes:", JSON.stringify(modeCounts));
-
-  return smoothed;
 }
 
 module.exports = { analyzeClipTimeline, analyzeSpeakers, buildFullVideoLayoutMap };
