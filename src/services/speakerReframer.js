@@ -385,26 +385,129 @@ function _normMode(mode) {
 
 // ─── Grid layout classifier ───────────────────────────────────────────────────
 /**
- * Grid (→ blur_overlay): faces stacked in rows (cy std-dev HIGH) AND spread
- *   across columns (cx range HIGH) — Zoom-style 2×2 or N×M grid.
- * Panel (→ split): all faces at roughly the same height (cy std-dev LOW),
- *   spread left-right — in-person round-table or interview.
+ * Determines if a set of faces is a VIDEO-CALL GRID (→ blur_overlay)
+ * vs a TRUE SIDE-BY-SIDE PODCAST/INTERVIEW LAYOUT (→ split).
+ *
+ * Works for ANY number of faces including exactly 2.
+ *
+ * GRID signals (all of these lean toward blur_overlay):
+ *   1. Face area is small — each person only occupies a tile/quadrant,
+ *      not half the screen. In a real podcast the faces are large.
+ *   2. Significant vertical offset — faces are in different rows (top tile
+ *      vs bottom tile). In a side-by-side podcast both faces are at the
+ *      same height.
+ *   3. Faces positioned near quadrant centres (cx ≈ 0.25/0.75,
+ *      cy ≈ 0.25/0.75) rather than centred on the left/right halves.
+ *
+ * PODCAST/INTERVIEW signals (→ split):
+ *   1. Both faces are LARGE (area ≥ SPLIT_MIN_FACE_AREA_PODCAST) —
+ *      occupying a significant portion of the frame each.
+ *   2. Both faces at ROUGHLY THE SAME HEIGHT (low |cy diff|).
+ *   3. Spread horizontally across the frame (high cx diff).
+ *
+ * Returns "grid" | "panel"
  */
-function classifyMultiFaceLayout(faces) {
-  if (faces.length < 3) return "panel";
 
-  const cxValues = faces.map(f => f.cx);
-  const cyValues = faces.map(f => f.cy);
-  const cyMean   = cyValues.reduce((s, v) => s + v, 0) / cyValues.length;
-  const cyStdDev = Math.sqrt(
-    cyValues.reduce((s, v) => s + (v - cyMean) ** 2, 0) / cyValues.length
-  );
-  const cxRange  = Math.max(...cxValues) - Math.min(...cxValues);
+// ── Grid vs Podcast face-area thresholds ─────────────────────────────────────
+//
+// KEY INSIGHT: The only reliable signal for 2-face grid vs 2-face podcast is
+// VERTICAL OFFSET (cy diff). In a grid (Google Meet 2×2), one tile is on top
+// and one is on the bottom → large cy diff. In a podcast, both people sit at
+// the same table height → tiny cy diff.
+//
+// Face area is NOT reliable for 2-face cases because a wide-angle podcast
+// shot pulls back far enough that even large in-person faces have small
+// normalised area (0.015–0.04). Grid tiles are similarly small.
+// So area alone cannot distinguish them — we must use cy diff as primary signal.
+//
+const GRID_MIN_CY_DIFF_2FACE = 0.20;  // 2-face grid: vertical offset ≥ this → grid
+                                        // (top tile cy≈0.25, bottom tile cy≈0.75 → diff≈0.50)
+                                        // podcast: both at table → diff typically < 0.10
 
-  if (cyStdDev >= GRID_CY_STDDEV_THRESH && cxRange >= GRID_CX_SPREAD_THRESH) {
-    return "grid";
+function isGridLayout(faces) {
+  if (!faces.length) return false;
+
+  // ── 3+ faces ─────────────────────────────────────────────────────────────
+  if (faces.length >= 3) {
+    const cxValues = faces.map(f => f.cx);
+    const cyValues = faces.map(f => f.cy);
+    const cyMean   = cyValues.reduce((s, v) => s + v, 0) / cyValues.length;
+    const cyStdDev = Math.sqrt(
+      cyValues.reduce((s, v) => s + (v - cyMean) ** 2, 0) / cyValues.length
+    );
+    const cxRange  = Math.max(...cxValues) - Math.min(...cxValues);
+    const avgArea  = faces.reduce((s, f) => s + f.area, 0) / faces.length;
+
+    // SIGNAL 1: Multi-row grid (2×2 Zoom style)
+    // Faces in different rows → high cy std-dev AND spread horizontally
+    if (cyStdDev >= GRID_CY_STDDEV_THRESH && cxRange >= GRID_CX_SPREAD_THRESH) {
+      console.log(`[reframer/layout] 3+ faces → grid/multi-row (cyStdDev=${cyStdDev.toFixed(2)} cxRange=${cxRange.toFixed(2)})`);
+      return true;
+    }
+
+    // SIGNAL 2: Single-row grid (3-column tile like the NGCW image)
+    //
+    // Layout: 3 (or 4) tiles in one row — each person in their own bordered box,
+    // same height, evenly spaced across the full frame width.
+    //
+    // Distinguishing from a real round-table with 3 people:
+    //
+    //   A) FACE AREA — tile grids render each person small (confined to 1/N of
+    //      the frame). Real in-person panels have large faces (person fills
+    //      their half/third of the physical space). Threshold: avgArea < 0.07.
+    //      (NGCW tiles: each face ~0.04–0.07; in-person podcast: 0.08–0.15)
+    //
+    //   B) EVEN SPACING — tile software (OBS, Zoom, Meet) spaces faces exactly.
+    //      gapEvenness (maxGap / meanGap) ≈ 1.0 for tiles, higher for organic seating.
+    //      We combine both: area < threshold OR very even spacing (≤ 1.3).
+    //
+    if (faces.length >= 3 && cyStdDev < GRID_CY_STDDEV_THRESH && cxRange >= GRID_CX_SPREAD_THRESH) {
+      const sortedCx    = [...cxValues].sort((a, b) => a - b);
+      const gaps        = sortedCx.slice(1).map((v, i) => v - sortedCx[i]);
+      const meanGap     = gaps.reduce((s, v) => s + v, 0) / gaps.length;
+      const maxGap      = Math.max(...gaps);
+      const gapEvenness = meanGap > 0 ? maxGap / meanGap : 99;
+
+      // Tile grid: small faces (each person in their own small box)
+      // OR perfectly even spacing (software-enforced tile layout)
+      const isSmallFaces  = avgArea < 0.07;
+      const isPerfectGrid = gapEvenness <= 1.3;
+
+      if (isSmallFaces || isPerfectGrid) {
+        console.log(
+          `[reframer/layout] 3+ faces → grid/single-row ` +
+          `(cyStdDev=${cyStdDev.toFixed(2)} cxRange=${cxRange.toFixed(2)} ` +
+          `gapEvenness=${gapEvenness.toFixed(2)} avgArea=${avgArea.toFixed(3)})`
+        );
+        return true;
+      }
+      console.log(
+        `[reframer/layout] 3+ faces → panel (large faces + uneven gaps → physical table) ` +
+        `(cyStdDev=${cyStdDev.toFixed(2)} cxRange=${cxRange.toFixed(2)} ` +
+        `gapEvenness=${gapEvenness.toFixed(2)} avgArea=${avgArea.toFixed(3)})`
+      );
+      return false;
+    }
+
+    console.log(`[reframer/layout] 3+ faces → panel (cyStdDev=${cyStdDev.toFixed(2)} cxRange=${cxRange.toFixed(2)} avgArea=${avgArea.toFixed(3)})`);
+    return false;
   }
-  return "panel";
+
+  // ── Exactly 2 faces ───────────────────────────────────────────────────────
+  // PRIMARY SIGNAL: vertical offset only.
+  // Grid (2-tile): one person top-left, other bottom-right → cy diff large (≥ 0.20)
+  // Podcast side-by-side: both at same table height → cy diff small (< 0.12)
+  const [a, b] = faces;
+  const cyDiff = Math.abs(a.cy - b.cy);
+  const cxDiff = Math.abs(a.cx - b.cx);
+
+  if (cyDiff >= GRID_MIN_CY_DIFF_2FACE) {
+    console.log(`[reframer/layout] 2 faces → grid (vertical offset cyDiff=${cyDiff.toFixed(3)})`);
+    return true;
+  }
+
+  console.log(`[reframer/layout] 2 faces → podcast/panel (cyDiff=${cyDiff.toFixed(3)} cxDiff=${cxDiff.toFixed(3)})`);
+  return false;
 }
 
 // ─── Per-frame classifier ─────────────────────────────────────────────────────
@@ -431,68 +534,36 @@ function classifyFrame(trackedFaces, sceneChange = false) {
     };
   }
 
-  // 3+ faces — grid vs panel
-  if (sorted.length >= 3) {
-    const layoutType = classifyMultiFaceLayout(sorted);
-
-    if (layoutType === "grid") {
-      return { mode: "blur_overlay", sceneChange };
-    }
-
-    // In-person panel — use outermost two faces for split
-    const leftMost  = [...sorted].sort((a, b) => a.cx - b.cx)[0];
-    const rightMost = [...sorted].sort((a, b) => b.cx - a.cx)[0];
-    const cxDiff    = rightMost.cx - leftMost.cx;
-    const cyDiff    = Math.abs(leftMost.cy - rightMost.cy);
-    const areaRatio = Math.min(leftMost.area, rightMost.area) /
-                      Math.max(leftMost.area, rightMost.area);
-
-    if (
-      cxDiff    >= SPLIT_MIN_CX_DIFF   &&
-      cyDiff    <= SPLIT_MAX_CY_DIFF   &&
-      areaRatio >= SPLIT_MIN_AREA_RATIO * 0.7
-    ) {
-      return {
-        mode:         "split",
-        leftCxNorm:   leftMost.cx,  leftCyNorm:  leftMost.cy,
-        rightCxNorm:  rightMost.cx, rightCyNorm: rightMost.cy,
-        isWideLayout: cxDiff >= SPLIT_WIDE_LAYOUT_CX_DIFF,
-        sceneChange,
-      };
-    }
-
-    // Panel too tight for split → dominant face
-    return {
-      mode: "face",
-      faceCxNorm: sorted[0].cx, faceCyNorm: sorted[0].cy,
-      faceId: sorted[0].id, sceneChange,
-    };
+  // 2 or more faces — check grid first (works for both 2 and 3+)
+  if (isGridLayout(sorted)) {
+    return { mode: "blur_overlay", sceneChange };
   }
 
-  // Exactly 2 significant faces
-  const left  = sorted[0].cx <= sorted[1].cx ? sorted[0] : sorted[1];
-  const right  = sorted[0].cx <= sorted[1].cx ? sorted[1] : sorted[0];
-  const cxDiff    = right.cx - left.cx;
-  const cyDiff    = Math.abs(left.cy - right.cy);
-  const areaRatio = Math.min(left.area, right.area) / Math.max(left.area, right.area);
+  // Not a grid → try split (use outermost two faces)
+  const leftMost  = [...sorted].sort((a, b) => a.cx - b.cx)[0];
+  const rightMost = [...sorted].sort((a, b) => b.cx - a.cx)[0];
+  const cxDiff    = rightMost.cx - leftMost.cx;
+  const cyDiff    = Math.abs(leftMost.cy - rightMost.cy);
+  const areaRatio = Math.min(leftMost.area, rightMost.area) /
+                    Math.max(leftMost.area, rightMost.area);
+  const minArea   = Math.min(leftMost.area, rightMost.area);
 
   if (
-    left.area  >= SPLIT_MIN_FACE_AREA &&
-    right.area >= SPLIT_MIN_FACE_AREA &&
-    cxDiff     >= SPLIT_MIN_CX_DIFF   &&
-    cyDiff     <= SPLIT_MAX_CY_DIFF   &&
+    minArea    >= SPLIT_MIN_FACE_AREA   &&
+    cxDiff     >= SPLIT_MIN_CX_DIFF     &&
+    cyDiff     <= SPLIT_MAX_CY_DIFF     &&
     areaRatio  >= SPLIT_MIN_AREA_RATIO
   ) {
     return {
       mode:         "split",
-      leftCxNorm:   left.cx,  leftCyNorm:  left.cy,  leftId:  left.id,
-      rightCxNorm:  right.cx, rightCyNorm: right.cy, rightId: right.id,
+      leftCxNorm:   leftMost.cx,  leftCyNorm:  leftMost.cy,  leftId:  leftMost.id,
+      rightCxNorm:  rightMost.cx, rightCyNorm: rightMost.cy, rightId: rightMost.id,
       isWideLayout: cxDiff >= SPLIT_WIDE_LAYOUT_CX_DIFF,
       sceneChange,
     };
   }
 
-  // 2 faces but not a clean split → focus dominant speaker
+  // Can't form a clean split → focus dominant speaker
   const primary   = sorted[0];
   const secondary = sorted[1];
   return {

@@ -46,8 +46,8 @@ const HALF_H = 960;
 // SPLIT_ZOOM      — standard podcast (2 people roughly centred): slight zoom.
 // SPLIT_ZOOM_WIDE — complex panel (faces >50% apart, e.g. 2-left / 2-right):
 //                   barely any zoom so edge speakers are never cropped out.
-const SPLIT_ZOOM      = 1.15;  // was 1.35 — less aggressive
-const SPLIT_ZOOM_WIDE = 1.05;  // for isWideLayout panels
+const SPLIT_ZOOM      = 1.25;  // was 1.35 — less aggressive
+const SPLIT_ZOOM_WIDE = 1.15;  // for isWideLayout panels
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
