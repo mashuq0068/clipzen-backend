@@ -66,6 +66,7 @@ router.post(
       captionStyle,
       brollEnabled = false,
       brollStyle = "fullscreen",
+      jobType = "magic-clips",
     } = req.body;
 
     try {
@@ -107,11 +108,12 @@ router.post(
           auto_captions,
           hook_detection,
           caption_style,
-            broll_enabled,
-             broll_style   
+          broll_enabled,
+          broll_style,
+          job_type   
         )
         VALUES
-        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         RETURNING *`,
         [
           req.user.id,
@@ -127,6 +129,7 @@ router.post(
           captionStyle && typeof captionStyle === "object" ? JSON.stringify(captionStyle) : (captionStyle || "wordpop"),
           brollEnabled === true || brollEnabled === "true",
           brollStyle || "fullscreen",
+          jobType || "magic-clips",
         ],
       );
 

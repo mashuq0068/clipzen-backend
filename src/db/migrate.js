@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   broll_enabled    BOOLEAN DEFAULT FALSE,
   broll_style      TEXT NOT NULL DEFAULT 'fullscreen'
                    CHECK (broll_style IN ('fullscreen', 'pip')),
+  job_type         TEXT NOT NULL DEFAULT 'magic-clips',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -153,6 +154,8 @@ ALTER TABLE clips ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_enabled BOOLEAN DEFAULT FALSE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_style TEXT NOT NULL DEFAULT 'fullscreen' CHECK (broll_style IN ('fullscreen', 'pip'));
+
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'magic-clips';
 `;
 
 async function migrate() {
