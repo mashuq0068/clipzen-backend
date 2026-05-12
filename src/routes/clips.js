@@ -10,7 +10,7 @@ router.get("/:jobId", async (req, res) => {
   try {
     // Verify job belongs to user
     const { rows: jobRows } = await query(
-      `SELECT id, video_title, original_duration, platforms, status, thumbnail_url
+      `SELECT id, video_title, original_duration, platforms, status, thumbnail_url,job_type
        FROM jobs WHERE id = $1 AND user_id = $2`,
       [req.params.jobId, req.user.id],
     );
@@ -62,6 +62,7 @@ router.get("/:jobId", async (req, res) => {
         platforms: job.platforms,
         status: job.status,
         thumbnailUrl: job.thumbnail_url || null,
+        jobType: job.job_type,
       },
       clips: clipsWithCaptions,
     });
