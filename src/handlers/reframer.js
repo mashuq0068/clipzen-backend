@@ -15,19 +15,14 @@ async function handleReframer(dbJob, videoPath, jobId, userId, helpers) {
     endSec: 999999 // analyzeClipTimeline handles bounds
   };
 
-  console.log(`\nAnalyzing Speaker Layout (YOLO v8)...`);
-  const clipTimeline = await analyzeClipTimelineForClip(videoPath, clip);
-  
-  // Update endSec to actual duration if it was unknown
-  if (clipTimeline.duration) clip.endSec = clipTimeline.duration;
+  console.log(`\nTranscribing...`);
+  const segments = await transcribeVideo(videoPath);
+  const transcriptJson = JSON.stringify(segments);
 
-  console.log(`\nReframing Video...`);
-  const cut = await cutClip(videoPath, 0, clip.endSec, jobId, "general", clip, clipTimeline);
-  
   const { rows: clipRows } = await query(
-    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-    [jobId, userId, clip.title, cut.filePath, cut.fileUrl, formatTime(cut.duration), "0:00", formatTime(cut.duration), 100, platforms]
+    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms, transcript)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [jobId, userId, clip.title, cut.filePath, cut.fileUrl, formatTime(cut.duration), "0:00", formatTime(cut.duration), 100, platforms, transcriptJson]
   );
 
   const clipId = clipRows[0].id;

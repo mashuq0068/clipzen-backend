@@ -259,13 +259,13 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
     )
       continue;
 
-    const transcript = segments
-      .filter((s) => s.start >= finalStart - 1 && s.end <= finalEnd + 1)
-      .map((s) => s.text)
-      .join(" ")
-      .trim();
+    const clipSegments = segments.filter(
+      (s) => s.start >= finalStart - 1 && s.end <= finalEnd + 1
+    );
+    const transcript = JSON.stringify(clipSegments);
 
-    const title = transcript.split(/\s+/).slice(0, 7).join(" ");
+    const firstSegText = clipSegments[0]?.text || "";
+    const title = firstSegText.split(/\s+/).slice(0, 7).join(" ");
     usedRanges.push([finalStart, finalEnd]);
 
     if (stable.wasTrimmed) {

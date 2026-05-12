@@ -19,13 +19,14 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
   
   console.log(`\nTranscribing...`);
   const segments = await transcribeVideo(videoPath);
-  const transcript = segments.map(s => s.text).join(" ");
+  const transcriptJson = JSON.stringify(segments);
+  const plainText = segments.map(s => s.text).join(" ");
 
   const clip = {
     title: dbJob.video_title || "Edited Video",
     startSec: 0,
     endSec: segments[segments.length-1]?.endSec || 60, // Default to 60 if empty
-    transcript: transcript
+    transcript: transcriptJson
   };
 
   console.log(`\nAnalyzing Layout...`);

@@ -13,7 +13,7 @@ async function handleAddCaptions(dbJob, videoPath, jobId, userId) {
     title: dbJob.video_title || "Captioned Video",
     startSec: 0,
     endSec: wordTimings[wordTimings.length-1]?.endSec || 0,
-    transcript: segments.map(s => s.text).join(" ")
+    transcript: JSON.stringify(segments)
   };
 
   const captionedPath = await burnCaptions({

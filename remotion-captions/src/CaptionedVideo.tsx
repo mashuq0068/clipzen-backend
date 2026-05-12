@@ -1115,7 +1115,7 @@ export const CaptionedVideo: React.FC<Props> = ({
   return (
     <AbsoluteFill style={{ overflow: "hidden" }}>
       <Video
-        src={staticFile(videoSrc)}
+        src={videoSrc.startsWith("http") || videoSrc.match(/^[a-zA-Z]:/) || videoSrc.startsWith("/") ? videoSrc : staticFile(videoSrc)}
         style={{ width: "100%", height: "100%", objectFit: "cover" }}
       />
       {brollSegments.map((seg, i) => (
@@ -1157,6 +1157,13 @@ export const CaptionedVideo: React.FC<Props> = ({
           {iconAnimations.map(({ overlay, scale, opacity }, idx) => {
             const iconSize = overlay.size ?? 100;
             const isEmoji = !!overlay.emoji;
+            
+            // Fix for staticFile behavior in some environments where it prepends /public
+            let iconSrc = staticFile(`icons/${overlay.icon}`);
+            if (iconSrc.startsWith("/public/")) {
+              iconSrc = iconSrc.replace("/public/", "/");
+            }
+
             return (
               <div
                 key={`icon-${idx}-${overlay.atSec}`}
@@ -1186,7 +1193,7 @@ export const CaptionedVideo: React.FC<Props> = ({
                   </span>
                 ) : (
                   <img
-                    src={staticFile(`icons/${overlay.icon}`)}
+                    src={iconSrc}
                     alt=""
                     style={{
                       width: iconSize,

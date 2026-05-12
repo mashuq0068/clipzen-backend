@@ -634,22 +634,20 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
     const clipEnd   = segments[segments.length - 1].endSec;
     const clipDur   = clipEnd - clipStart;
 
-    const transcript = segments
-      .map((seg) =>
-        scored
-          .filter((b) => b.startSec >= seg.startSec - 1.0 && b.endSec <= seg.endSec + 1.0)
-          .map((b) => b.text)
-          .join(" ")
+    const transcriptSegments = segments.flatMap((seg) =>
+      scored.filter(
+        (b) => b.startSec >= seg.startSec - 1.0 && b.endSec <= seg.endSec + 1.0
       )
-      .join(" ")
-      .trim() || topBlock.text;
+    );
+    const transcript = JSON.stringify(transcriptSegments);
+    const plainText = transcriptSegments.map(b => b.text).join(" ");
 
-    const topic        = detectTopic(transcript);
+    const topic        = detectTopic(plainText);
     const finalEmotion = topBlock.ollamaEmotionOverride || topBlock.emotion;
     const colorGrade   = topBlock.ollamaGradeOverride   || emotionToColorGrade(finalEmotion, topBlock.role);
     const audioMood    = topBlock.ollamaAudioOverride    || emotionToAudioMood(finalEmotion, topic);
     const directives   = buildEditingDirectives(topic, finalEmotion, topBlock.role);
-    const titleWords   = topBlock.text.trim().split(/\s+/).slice(0, 7).join(" ");
+    const titleWords   = (plainText || topBlock.text).trim().split(/\s+/).slice(0, 7).join(" ");
 
     // Layout instability of the assembled clip (spans all its segments)
     const clipInstability = layoutMap
@@ -732,12 +730,14 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
         endSec   = snapToSentenceEnd(allWords, endSec, 15.0);
       }
 
+      const padTranscript = JSON.stringify([{ start: startSec, end: endSec, text: block.text }]);
+
       const padPlan = {
         startSec,
         endSec,
         title: (block.text.trim().split(/\s+/).slice(0, 7).join(" ") || `Clip ${clipPlans.length + 1}`) + "...",
         hookScore: Math.min(72, Math.round(35 + block.score * 0.3)),
-        transcript: block.text,
+        transcript: padTranscript,
         contentType: detectTopic(block.text),
         topic: detectTopic(block.text),
         emotion: block.emotion,

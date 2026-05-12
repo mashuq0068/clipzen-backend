@@ -961,6 +961,7 @@ async function burnCaptions(clip, contentType, platforms) {
       "--log=error",
       "--timeout=120000",
       "--delayRenderTimeoutInMilliseconds=60000",
+      "--public-dir=public",
     ].join(" ");
 
     const iconCount = (emojiOverlays || []).filter((o) => o.icon).length;

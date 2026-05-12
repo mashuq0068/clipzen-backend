@@ -51,7 +51,18 @@ function getFallbackCaption(title, platform) {
 async function generateCaption(transcript, clipTitle, platform) {
   const instruction =
     PLATFORM_INSTRUCTIONS[platform] || PLATFORM_INSTRUCTIONS.tiktok;
-  const excerpt = (transcript || "").substring(0, 400).trim();
+
+  let plainText = transcript || "";
+  try {
+    const parsed = JSON.parse(transcript);
+    if (Array.isArray(parsed)) {
+      plainText = parsed.map(s => s.text).join(" ");
+    }
+  } catch (e) {
+    // Not JSON, use as is
+  }
+
+  const excerpt = plainText.substring(0, 500).trim();
 
   return llmWithRetry({
     prompt: `Write a social media caption for a short-form video.
