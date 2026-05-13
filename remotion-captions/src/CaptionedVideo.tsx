@@ -1157,12 +1157,10 @@ export const CaptionedVideo: React.FC<Props> = ({
           {iconAnimations.map(({ overlay, scale, opacity }, idx) => {
             const iconSize = overlay.size ?? 100;
             const isEmoji = !!overlay.emoji;
-            
-            // Fix for staticFile behavior in some environments where it prepends /public
-            let iconSrc = staticFile(`icons/${overlay.icon}`);
-            if (iconSrc.startsWith("/public/")) {
-              iconSrc = iconSrc.replace("/public/", "/");
-            }
+            // Only use staticFile when we actually have an icon filename
+            const iconSrc = !isEmoji && overlay.icon
+              ? staticFile(`icons/${overlay.icon}`)
+              : null;
 
             return (
               <div
@@ -1191,7 +1189,7 @@ export const CaptionedVideo: React.FC<Props> = ({
                   >
                     {overlay.emoji}
                   </span>
-                ) : (
+                ) : iconSrc ? (
                   <img
                     src={iconSrc}
                     alt=""
@@ -1203,7 +1201,7 @@ export const CaptionedVideo: React.FC<Props> = ({
                       objectFit: "contain",
                     }}
                   />
-                )}
+                ) : null}
               </div>
             );
           })}

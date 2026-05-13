@@ -179,7 +179,7 @@ router.get("/", async (req, res) => {
 
     const { rows } = await query(
       `SELECT id, status, source_type, source_url, video_title,
-              original_duration, clip_count, platforms, thumbnail_url,
+              original_duration, clip_count, platforms, thumbnail_url, job_type,
               created_at, updated_at
        FROM jobs
        WHERE user_id = $1
@@ -213,7 +213,7 @@ router.get("/:id", async (req, res) => {
     const { rows } = await query(
       `SELECT id, status, source_type, source_url, video_title,
               original_duration, clip_count, platforms, thumbnail_url,
-              error_message, created_at, updated_at
+              error_message, job_type, created_at, updated_at
        FROM jobs
        WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
