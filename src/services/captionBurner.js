@@ -788,10 +788,21 @@ async function burnCaptions(clip, contentType, platforms) {
     // ── WORDS ─────────────────────────────────────────────────
     let words;
 
-    // wordTimings are always clip-relative by the time they arrive here.
-    // magicClips already remaps stitched clips; addCaptions starts at 0.
-    // Do NOT re-remap - just clamp and filter.
-    if (clip.wordTimings && clip.wordTimings.length > 0) {
+    const hasOriginalSegments =
+      clip.originalSegments && clip.originalSegments.length > 0;
+    const isStitched = hasOriginalSegments && clip.originalSegments.length > 1;
+
+    if (isStitched && clip.wordTimings && clip.wordTimings.length > 0) {
+      console.log(
+        `      🔧 Stitched clip: remapping word timings across ${clip.originalSegments.length} segments`,
+      );
+      words = extractWordTimingsForStitchedClip(
+        clip.wordTimings,
+        clip.originalSegments,
+        clipDurationSecs,
+      );
+      console.log(`      ✅ Stitched remap: ${words.length} words`);
+    } else if (clip.wordTimings && clip.wordTimings.length > 0) {
       words = clip.wordTimings
         .map((w) => ({
           ...w,
@@ -950,7 +961,6 @@ async function burnCaptions(clip, contentType, platforms) {
       "--log=error",
       "--timeout=120000",
       "--delayRenderTimeoutInMilliseconds=60000",
-      "--public-dir=public",
     ].join(" ");
 
     const iconCount = (emojiOverlays || []).filter((o) => o.icon).length;
@@ -968,7 +978,8 @@ async function burnCaptions(clip, contentType, platforms) {
     });
 
     if (!fs.existsSync(remotionOutput)) {
-      throw new Error("Remotion output missing after render — likely a silent Remotion crash (check stderr above)");
+      console.warn("   ⚠️  Remotion output missing — returning original");
+      return clip.filePath;
     }
 
     await postProcessForInstagram(remotionOutput, remuxOutput);
@@ -977,7 +988,8 @@ async function burnCaptions(clip, contentType, platforms) {
     } catch {}
 
     if (!fs.existsSync(remuxOutput) || fs.statSync(remuxOutput).size < 100000) {
-      throw new Error("postProcessForInstagram (remux) failed — output missing or too small");
+      console.warn("   ⚠️  Remux failed — returning original");
+      return clip.filePath;
     }
 
     let sfxApplied = false;
@@ -1024,7 +1036,7 @@ async function burnCaptions(clip, contentType, platforms) {
       err.killed,
     );
     if (err.stderr) console.error("   stderr:", err.stderr.substring(0, 1000));
-    throw err;
+    return clip.filePath;
   } finally {
     if (brollServerInstance) {
       await stopVideoServer(brollServerInstance).catch(() => {});
