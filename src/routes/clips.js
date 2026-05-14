@@ -23,7 +23,7 @@ router.get("/:jobId", async (req, res) => {
 
     // Fetch clips — thumbnail_url included
     const { rows: clips } = await query(
-      `SELECT c.id, c.title, c.file_url, c.duration, c.start_time, c.end_time,
+      `SELECT c.id, c.title, c.file_url, c.file_path, c.duration, c.start_time, c.end_time,
               c.hook_score, c.platforms, c.thumbnail_color, c.thumbnail_url,
               c.transcript, c.created_at
        FROM clips c
@@ -96,7 +96,7 @@ router.get("/library/all", async (req, res) => {
 
     // Get clips with pagination — thumbnail_url included
     const { rows: clips } = await query(
-      `SELECT c.id, c.job_id, c.title, c.file_url, c.duration,
+      `SELECT c.id, c.job_id, c.title, c.file_url, c.file_path, c.duration,
               c.hook_score, c.platforms, c.thumbnail_color, c.thumbnail_url,
               c.transcript, c.created_at
        FROM clips c
