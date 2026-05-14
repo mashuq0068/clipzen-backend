@@ -82,6 +82,8 @@ export interface StyleConfig {
   positionLeft?: number | string;
   positionRight?: number | string;
   positionTransform?: string;
+  offsetX?: number;
+  offsetY?: number;
 }
 
 interface Word {
@@ -135,37 +137,41 @@ export function getStrokeValue(s: StyleConfig): string | undefined {
 }
 
 export function getLayoutPosition(layout: string, style?: StyleConfig): React.CSSProperties {
-  if (style) {
-    const hasCustomPosition =
-      style.positionBottom !== undefined ||
-      style.positionTop !== undefined ||
-      style.positionLeft !== undefined ||
-      style.positionRight !== undefined;
+  let baseLayout: React.CSSProperties = {};
+  switch (layout) {
+    case "top-left":
+      baseLayout = { top: 60, left: 20, right: 20 };
+      break;
+    case "center":
+      baseLayout = { top: "50%", left: 20, right: 20, transform: "translateY(-50%)" };
+      break;
+    case "bottom-right":
+      baseLayout = { bottom: 80, right: 20, left: "auto", maxWidth: "75%" };
+      break;
+    case "bottom-left":
+      baseLayout = { bottom: 80, left: 20, right: "auto", maxWidth: "80%" };
+      break;
+    case "bottom-center":
+    default:
+      baseLayout = { bottom: 80, left: 40, right: 40 };
+      break;
+  }
 
-    if (hasCustomPosition) {
-      const pos: React.CSSProperties = {};
-      if (style.positionBottom !== undefined) pos.bottom = style.positionBottom;
-      if (style.positionTop !== undefined) pos.top = style.positionTop;
-      if (style.positionLeft !== undefined) pos.left = style.positionLeft;
-      if (style.positionRight !== undefined) pos.right = style.positionRight;
-      if (style.positionTransform !== undefined) pos.transform = style.positionTransform;
-      return pos;
+  if (style) {
+    if (style.offsetX !== undefined || style.offsetY !== undefined) {
+      const merged = { ...baseLayout };
+      const tx = style.offsetX || 0;
+      const ty = style.offsetY || 0;
+      
+      if (tx !== 0 || ty !== 0) {
+        const baseTransform = merged.transform ? `${merged.transform} ` : "";
+        merged.transform = `${baseTransform}translate(${tx}px, ${ty}px)`;
+      }
+      return merged;
     }
   }
 
-  switch (layout) {
-    case "top-left":
-      return { top: 60, left: 20, right: 20 };
-    case "center":
-      return { top: "50%", left: 20, right: 20, transform: "translateY(-50%)" };
-    case "bottom-right":
-      return { bottom: 80, right: 20, left: "auto", maxWidth: "75%" };
-    case "bottom-left":
-      return { bottom: 80, left: 20, right: "auto", maxWidth: "80%" };
-    case "bottom-center":
-    default:
-      return { bottom: 280, left: 150, right: 150 };
-  }
+  return baseLayout;
 }
 
 export function getAlignItems(

@@ -48,11 +48,10 @@ async function handleBrollOnly(dbJob, videoPath, jobId, userId, helpers) {
 
   const wordTimings = extractWordTimingsForClip(segments, 0, videoDuration);
 
-  // Determine output dir — same folder as source or jobs output dir
-  const outputDir = pathModule.join(
-    process.env.OUTPUTS_DIR || pathModule.dirname(videoPath),
-    jobId,
-  );
+  // Output dir must always be inside outputs/<jobId>/ so fileUrl resolves correctly.
+  // Never derive from videoPath (which is in uploads/) — that breaks the URL mapping.
+  const OUTPUTS_DIR = process.env.OUTPUTS_DIR || pathModule.resolve(__dirname, '../../outputs');
+  const outputDir = pathModule.join(OUTPUTS_DIR, jobId);
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   console.log(`\nBuilding B-roll segments...`);
@@ -120,50 +119,31 @@ async function handleBrollOnly(dbJob, videoPath, jobId, userId, helpers) {
 /**
  * applyBrollOverlay
  *
- * Overlays b-roll clips onto the base video at their designated time windows
- * using ffmpeg filter_complex. Supports "fullscreen" style (replaces video track)
- * and "pip" / side-by-side styles as your brollEngine defines them.
+ * Overlays b-roll clips onto the base video using ffmpeg filter_complex.
  *
- * brollSegments shape expected:
- *   { startSec, endSec, videoUrl (local path), style? }
+ * Two bugs fixed vs the old version:
+ *  1. STUCK FRAME — the old code used `-ss 0 -t dur` as an INPUT flag, so the
+ *     b-roll clip was decoded from t=0 in its own timeline but the overlay
+ *     `enable='between(t,startSec,endSec)'` gate uses the BASE video's clock.
+ *     The b-roll plays silently from second 0, and when the gate opens it's
+ *     already partway through — or ffmpeg holds the last decoded frame making it
+ *     look frozen. Fix: use setpts to retime the b-roll so its t=0 lines up with
+ *     the overlay window start in the base video timeline.
+ *  2. FULL-WIDTH / NO BLACK BARS — old code used
+ *     `force_original_aspect_ratio=decrease` + pad, which letterboxes portrait
+ *     b-roll inside a landscape frame (or vice-versa). Fix: use
+ *     `force_original_aspect_ratio=increase` + crop to fill the frame edge-to-edge
+ *     regardless of whether the source video or b-roll is portrait or landscape.
  */
 async function applyBrollOverlay(baseVideoPath, brollSegments, outputPath, totalDuration) {
   const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-
-  // Build ffmpeg inputs: [0] = base, [1..N] = b-roll clips
-  const inputs = [`-i "${baseVideoPath}"`];
-  const validSegments = [];
-
-  for (const seg of brollSegments) {
-    const brollPath = seg.videoUrl || seg.filePath || seg.path;
-    if (!brollPath || !fs.existsSync(brollPath)) {
-      console.warn(`   ⚠️  B-roll file missing, skipping: ${brollPath}`);
-      continue;
-    }
-    const segDur = seg.endSec - seg.startSec;
-    if (segDur <= 0) continue;
-    // Trim b-roll to exact needed duration before overlaying
-    inputs.push(`-ss 0 -t ${segDur.toFixed(3)} -i "${brollPath}"`);
-    validSegments.push(seg);
-  }
-
-  if (validSegments.length === 0) {
-    // Nothing valid — just copy
-    fs.copyFileSync(baseVideoPath, outputPath);
-    return;
-  }
-
-  // Build filter_complex: overlay each b-roll at its timestamp
-  // For fullscreen: use `overlay=0:0:enable='between(t,start,end)'`
-  // Scale each b-roll to match source dimensions first
-  let filterParts = [];
-  let currentVideo = "[0:v]";
+  const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
 
   // Probe base video dimensions
   let srcW = 1920, srcH = 1080;
   try {
     const { stdout } = await execAsync(
-      `"${process.env.FFPROBE_PATH || "ffprobe"}" -v quiet -select_streams v:0 -show_entries stream=width,height -of json "${baseVideoPath}"`,
+      `"${ffprobe}" -v quiet -select_streams v:0 -show_entries stream=width,height -of json "${baseVideoPath}"`,
       { timeout: 10000 },
     );
     const info = JSON.parse(stdout);
@@ -173,18 +153,61 @@ async function applyBrollOverlay(baseVideoPath, brollSegments, outputPath, total
     }
   } catch {}
 
+  // Build input list and valid segments
+  const inputs = [`-i "${baseVideoPath}"`];
+  const validSegments = [];
+
+  for (const seg of brollSegments) {
+    const brollPath = seg.videoUrl || seg.filePath || seg.path;
+    if (!brollPath || !fs.existsSync(brollPath)) {
+      console.warn(`   ⚠️  B-roll file missing, skipping: ${brollPath}`);
+      continue;
+    }
+    // brollEngine returns durationSec, not endSec — support both shapes
+    const segDur = seg.endSec != null
+      ? seg.endSec - seg.startSec
+      : (seg.durationSec || 0);
+    if (segDur <= 0) continue;
+
+    // Load the full b-roll clip — trimming is done in the filter graph via trim/setpts
+    // so the decoder has frames ready exactly when the overlay gate opens.
+    inputs.push(`-i "${brollPath}"`);
+    validSegments.push({ ...seg, _startSec: seg.startSec, _endSec: seg.startSec + segDur, _dur: segDur });
+  }
+
+  if (validSegments.length === 0) {
+    fs.copyFileSync(baseVideoPath, outputPath);
+    return;
+  }
+
+  let filterParts = [];
+  let currentVideo = "[0:v]";
+
   for (let idx = 0; idx < validSegments.length; idx++) {
     const seg = validSegments[idx];
-    const inputIdx = idx + 1; // 0 is base
+    const inputIdx = idx + 1;
+    const trimLabel  = `[btrim${idx}]`;
     const scaledLabel = `[bscaled${idx}]`;
-    const outLabel = idx < validSegments.length - 1 ? `[vout${idx}]` : "[vfinal]";
+    const outLabel   = idx < validSegments.length - 1 ? `[vout${idx}]` : "[vfinal]";
 
+    // FIX 1 (stuck): trim the b-roll to [0, segDur] in its own timeline,
+    // then shift its PTS so t=0 of the b-roll aligns with startSec of the base video.
+    // The overlay filter's enable gate then opens exactly when the clip is ready.
     filterParts.push(
-      `[${inputIdx}:v]scale=${srcW}:${srcH}:force_original_aspect_ratio=decrease,pad=${srcW}:${srcH}:(ow-iw)/2:(oh-ih)/2${scaledLabel}`,
+      `[${inputIdx}:v]trim=0:${seg._dur.toFixed(3)},setpts=PTS-STARTPTS+${seg._startSec.toFixed(3)}/TB${trimLabel}`
     );
+
+    // FIX 2 (full-width): scale to fill (increase + crop) instead of letterbox (decrease + pad).
+    // Works for any input aspect ratio — portrait b-roll on landscape video, or vice-versa.
     filterParts.push(
-      `${currentVideo}${scaledLabel}overlay=0:0:enable='between(t,${seg.startSec.toFixed(3)},${seg.endSec.toFixed(3)})'${outLabel}`,
+      `${trimLabel}scale=${srcW}:${srcH}:force_original_aspect_ratio=increase,crop=${srcW}:${srcH}${scaledLabel}`
     );
+
+    // Overlay: enable window matches the retimed PTS exactly
+    filterParts.push(
+      `${currentVideo}${scaledLabel}overlay=0:0:enable='between(t,${seg._startSec.toFixed(3)},${seg._endSec.toFixed(3)})'${outLabel}`
+    );
+
     currentVideo = outLabel;
   }
 
@@ -195,7 +218,7 @@ async function applyBrollOverlay(baseVideoPath, brollSegments, outputPath, total
     inputs.join(" "),
     `-filter_complex "${filterComplex}"`,
     `-map "[vfinal]"`,
-    `-map 0:a:0`,          // always keep original audio
+    `-map 0:a:0`,
     `-c:v libx264`,
     `-preset fast`,
     `-crf 18`,
