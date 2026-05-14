@@ -60,33 +60,55 @@ const worker = new Worker(
 
         const jobThumbnailUrl = await extractJobThumbnail(videoPath, jobId);
         if (jobThumbnailUrl) {
-          await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [jobThumbnailUrl, jobId]);
+          await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [
+            jobThumbnailUrl,
+            jobId,
+          ]);
         }
       } else {
         videoPath = dbJob.source_file_path;
-        if (!videoPath || !fs.existsSync(videoPath)) throw new Error(`File not found: ${videoPath}`);
+        if (!videoPath || !fs.existsSync(videoPath))
+          throw new Error(`File not found: ${videoPath}`);
         const jobThumbnailUrl = await extractJobThumbnail(videoPath, jobId);
         if (jobThumbnailUrl) {
-          await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [jobThumbnailUrl, jobId]);
+          await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [
+            jobThumbnailUrl,
+            jobId,
+          ]);
         }
       }
 
-      await query("UPDATE jobs SET video_title = $1, original_duration = $2 WHERE id = $3", [videoTitle, originalDuration, jobId]);
+      await query(
+        "UPDATE jobs SET video_title = $1, original_duration = $2 WHERE id = $3",
+        [videoTitle, originalDuration, jobId],
+      );
 
-      // Duration check for specific services (Max 5 mins = 300s)
+      // Duration check for specific services (max 5 mins = 300s)
       if (jobType === "edit-video" || jobType === "b-roll") {
         const durMatch = originalDuration.match(/(\d+):(\d+)/);
         if (durMatch) {
           const mins = parseInt(durMatch[1]);
-          if (mins >= 5) throw new Error("Video too long. Max duration for this service is 5 minutes.");
+          if (mins >= 5)
+            throw new Error(
+              "Video too long. Max duration for this service is 5 minutes.",
+            );
         }
       }
 
       console.log(`\nJob Type: ${jobType}`);
 
+      // Handlers that return { brollFolder } will populate it for cleanup below
+      let handlerResult = null;
+
       switch (jobType) {
         case "magic-clips":
-          await handleMagicClips(dbJob, videoPath, jobId, userId, workerHelpers);
+          handlerResult = await handleMagicClips(
+            dbJob,
+            videoPath,
+            jobId,
+            userId,
+            workerHelpers,
+          );
           break;
         case "add-captions":
           await handleAddCaptions(dbJob, videoPath, jobId, userId);
@@ -98,27 +120,53 @@ const worker = new Worker(
           await handleTranscribe(dbJob, videoPath, jobId, userId);
           break;
         case "edit-video":
-          await handleEditVideo(dbJob, videoPath, jobId, userId, workerHelpers);
+          handlerResult = await handleEditVideo(
+            dbJob,
+            videoPath,
+            jobId,
+            userId,
+            workerHelpers,
+          );
           break;
         case "b-roll":
           await handleBrollOnly(dbJob, videoPath, jobId, userId, workerHelpers);
           break;
         default:
-          await handleMagicClips(dbJob, videoPath, jobId, userId, workerHelpers);
+          handlerResult = await handleMagicClips(
+            dbJob,
+            videoPath,
+            jobId,
+            userId,
+            workerHelpers,
+          );
+      }
+
+      // Pick up brollFolder from handler if it returned one
+      if (handlerResult?.brollFolder) {
+        brollFolder = handlerResult.brollFolder;
       }
 
       await query("UPDATE jobs SET status = 'done' WHERE id = $1", [jobId]);
       console.log(`\nDONE: Job ${jobId}\n`);
     } catch (err) {
       console.error(`\nFAILED: ${err.message}`);
-      await query("UPDATE jobs SET status = 'failed', error_message = $1 WHERE id = $2", [err.message.substring(0, 500), jobId]).catch(() => {});
+      await query(
+        "UPDATE jobs SET status = 'failed', error_message = $1 WHERE id = $2",
+        [err.message.substring(0, 500), jobId],
+      ).catch(() => {});
       throw err;
     } finally {
       if (downloadedLocally && videoPath && fs.existsSync(videoPath)) {
-        try { fs.unlinkSync(videoPath); console.log("Source cleaned up"); } catch {}
+        try {
+          fs.unlinkSync(videoPath);
+          console.log("Source cleaned up");
+        } catch {}
       }
       if (brollFolder && fs.existsSync(brollFolder)) {
-        try { fs.rmSync(brollFolder, { recursive: true, force: true }); console.log("🧹 B‑roll folder cleaned up"); } catch {}
+        try {
+          fs.rmSync(brollFolder, { recursive: true, force: true });
+          console.log("🧹 B-roll folder cleaned up");
+        } catch {}
       }
     }
   },
