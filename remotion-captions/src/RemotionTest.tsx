@@ -333,7 +333,7 @@ export const CAPTION_STYLES = {
     textColor: "#FFFFFF",
     activeColor: "#FFD700",
     strokeColor: "#000000",
-    strokeWidth: 2,
+    strokeWidth: 0,
     bgBoxColor: "transparent",
     animation: "blur_in",
     fontSize: 76,
@@ -347,7 +347,7 @@ export const CAPTION_STYLES = {
     letterSpacing: "4px",
     activeStrategy: "shimmer",
     gradient:
-      "linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",
+        "linear-gradient(90deg, #FFFFFF 0%, #D4AF37 25%, #FFFFFF 50%, #D4AF37 75%, #FFFFFF 100%)"
   },
   retro_wave: {
     name: "retro_wave",
