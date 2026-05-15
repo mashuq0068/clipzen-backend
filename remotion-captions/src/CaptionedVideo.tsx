@@ -153,7 +153,7 @@ export function getLayoutPosition(layout: string, style?: StyleConfig): React.CS
       break;
     case "bottom-center":
     default:
-      baseLayout = { bottom: 80, left: 40, right: 40 };
+      baseLayout = { bottom: 280, left: 40, right: 40 };
       break;
   }
 
@@ -1058,6 +1058,7 @@ const BrollInner: React.FC<{
     <AbsoluteFill style={{ opacity, zIndex: 10 }}>
       <OffthreadVideo
         src={videoUrl}
+        muted={true}
         style={{ width: "100%", height: "100%", objectFit: "cover" }}
       />
     </AbsoluteFill>

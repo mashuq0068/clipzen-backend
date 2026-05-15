@@ -183,33 +183,41 @@ async function applyBrollOverlay(baseVideoPath, brollSegments, outputPath, total
   let filterParts = [];
   let currentVideo = "[0:v]";
 
-  for (let idx = 0; idx < validSegments.length; idx++) {
+for (let idx = 0; idx < validSegments.length; idx++) {
     const seg = validSegments[idx];
     const inputIdx = idx + 1;
     const trimLabel  = `[btrim${idx}]`;
     const scaledLabel = `[bscaled${idx}]`;
     const outLabel   = idx < validSegments.length - 1 ? `[vout${idx}]` : "[vfinal]";
 
-    // FIX 1 (stuck): trim the b-roll to [0, segDur] in its own timeline,
-    // then shift its PTS so t=0 of the b-roll aligns with startSec of the base video.
-    // The overlay filter's enable gate then opens exactly when the clip is ready.
     filterParts.push(
       `[${inputIdx}:v]trim=0:${seg._dur.toFixed(3)},setpts=PTS-STARTPTS+${seg._startSec.toFixed(3)}/TB${trimLabel}`
     );
 
-    // FIX 2 (full-width): scale to fill (increase + crop) instead of letterbox (decrease + pad).
-    // Works for any input aspect ratio — portrait b-roll on landscape video, or vice-versa.
-    filterParts.push(
-      `${trimLabel}scale=${srcW}:${srcH}:force_original_aspect_ratio=increase,crop=${srcW}:${srcH}${scaledLabel}`
-    );
+    // Probe b-roll dimensions to decide scale strategy
+    let bW = srcW, bH = srcH;
+    try {
+      const brollPath = seg.videoUrl || seg.filePath || seg.path;
+      const { stdout: brollInfo } = await execAsync(
+        `"${ffprobe}" -v quiet -select_streams v:0 -show_entries stream=width,height -of json "${brollPath}"`,
+        { timeout: 10000 }
+      );
+      const brollMeta = JSON.parse(brollInfo);
+      if (brollMeta?.streams?.[0]) {
+        bW = brollMeta.streams[0].width || bW;
+        bH = brollMeta.streams[0].height || bH;
+      }
+    } catch {}
 
-    // Overlay: enable window matches the retimed PTS exactly
-    filterParts.push(
-      `${currentVideo}${scaledLabel}overlay=0:0:enable='between(t,${seg._startSec.toFixed(3)},${seg._endSec.toFixed(3)})'${outLabel}`
-    );
+    const baseIsPortrait = srcH > srcW;
+    const brollIsPortrait = bH > bW;
+    const sameOrientation = baseIsPortrait === brollIsPortrait;
 
-    currentVideo = outLabel;
-  }
+    const scaleFilter = sameOrientation
+      ? `scale=${srcW}:${srcH}:force_original_aspect_ratio=increase,crop=${srcW}:${srcH}`
+      : `scale=${srcW}:${srcH}:force_original_aspect_ratio=decrease,pad=${srcW}:${srcH}:(ow-iw)/2:(oh-ih)/2:black`;
+
+    filterParts.push(`${trimLabel}${scaleFilter}${scaledLabel}`);
 
   const filterComplex = filterParts.join("; ");
 

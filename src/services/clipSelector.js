@@ -214,7 +214,15 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
 
   const totalSecs = segments[segments.length - 1]?.end || 0;
   const duration  = getPlatformDuration(platforms, clipDuration);
-  const idealDur  = duration.ideal;
+
+  // Adaptive ideal duration: if video is short relative to clipCount,
+  // shrink the window so we can produce distinct clips without running out of content.
+  const rawIdeal  = duration.ideal;
+  const adaptedIdeal = Math.max(
+    10, // absolute minimum window
+    Math.min(rawIdeal, Math.floor(totalSecs / clipCount) + 5)
+  );
+  const idealDur = adaptedIdeal;
 
   const scored = segments.map((seg, i) => {
     const text      = seg.text.toLowerCase();
@@ -226,8 +234,8 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
       posRatio < 0.15 ? 20 : posRatio < 0.4 ? 15 : posRatio < 0.75 ? 10 : 5;
 
     // Penalise segments in unstable layout regions
-    const rawEnd       = Math.min(seg.start + idealDur, totalSecs);
-    const instability  = layoutInstabilityScore(layoutMap, seg.start, rawEnd);
+    const rawEnd        = Math.min(seg.start + idealDur, totalSecs);
+    const instability   = layoutInstabilityScore(layoutMap, seg.start, rawEnd);
     const layoutPenalty = Math.round(instability * 30); // up to -30 points
 
     return { ...seg, _idx: i, score: hookScore + posScore - layoutPenalty };
@@ -238,16 +246,17 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
   const clips      = [];
   const usedRanges = [];
 
+  // ── Pass 1: strict non-overlapping ───────────────────────────
   for (const seg of scored) {
     if (clips.length >= clipCount) break;
 
-    const rawStart  = Math.max(0, seg.start - 1);
+    const rawStart   = Math.max(0, seg.start - 1);
     const cleanStart = findCleanStart(segments, rawStart);
     const rawEnd     = cleanStart + idealDur;
     const cleanEnd   = findCleanEnd(segments, rawEnd);
 
     // Trim to stable layout window
-    const stable = findStableWindow(layoutMap, cleanStart, cleanEnd);
+    const stable     = findStableWindow(layoutMap, cleanStart, cleanEnd);
     const finalStart = stable.newStart;
     const finalEnd   = stable.newEnd;
 
@@ -299,6 +308,82 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
       },
       reason: stable.wasTrimmed ? "Rule-based (layout-trimmed)" : "Rule-based",
     });
+  }
+
+  // ── Pass 2: overlap-fill to guarantee exact clipCount ────────
+  // When the strict pass can't produce enough non-overlapping clips
+  // (video too short, too few scored segments), distribute remaining
+  // slots evenly across the timeline. Overlapping is acceptable here.
+  if (clips.length < clipCount) {
+    const stillNeeded = clipCount - clips.length;
+    console.log(
+      `   ⚡ Rule-based strict pass gave ${clips.length}/${clipCount} — overlap fill for ${stillNeeded} more`
+    );
+
+    const zoneSize = totalSecs / stillNeeded;
+
+    for (let z = 0; z < stillNeeded; z++) {
+      if (clips.length >= clipCount) break;
+
+      const zoneMid = z * zoneSize + zoneSize / 2;
+
+      // Find the segment closest to the centre of this zone
+      const anchor = scored.reduce((best, s) => {
+        const sMid   = s.start + (s.end - s.start) / 2;
+        const bestMid = best.start + (best.end - best.start) / 2;
+        return Math.abs(sMid - zoneMid) < Math.abs(bestMid - zoneMid) ? s : best;
+      }, scored[0]);
+
+      const rawStart   = Math.max(0, anchor.start - 1);
+      const cleanStart = findCleanStart(segments, rawStart);
+      const rawEnd     = Math.min(totalSecs, cleanStart + idealDur);
+      const cleanEnd   = findCleanEnd(segments, rawEnd);
+
+      const finalStart = Math.max(0, cleanStart);
+      const finalEnd   = Math.min(totalSecs, cleanEnd);
+      const dur        = finalEnd - finalStart;
+
+      if (dur < 8) continue;
+
+      const clipSegments = segments.filter(
+        (s) => s.start >= finalStart - 1 && s.end <= finalEnd + 1
+      );
+      const transcript = JSON.stringify(clipSegments);
+      const firstText  = clipSegments[0]?.text || "";
+      const title      = firstText.split(/\s+/).slice(0, 7).join(" ");
+
+      const stable = findStableWindow(layoutMap, finalStart, finalEnd);
+
+      console.log(
+        `      📍 Overlap-fill rule clip ${z + 1}: ${(finalStart/60).toFixed(1)}m-${(finalEnd/60).toFixed(1)}m (${dur.toFixed(0)}s)`
+      );
+
+      clips.push({
+        startSec:      finalStart,
+        endSec:        finalEnd,
+        title:         title.length > 5 ? title + "..." : `Highlight ${clips.length + 1}`,
+        hookScore:     Math.min(75, Math.round(35 + anchor.score)),
+        transcript,
+        contentType:   "general",
+        emotion:       "neutral",
+        colorGrade:    "none",
+        audioMood:     "none",
+        narrativeRole: "body",
+        layoutStable:  stable.instability <= STABLE_THRESHOLD,
+        dominantLayout: stable.dominant.mode,
+        segments:      [{ startSec: finalStart, endSec: finalEnd, role: "body" }],
+        directives: {
+          captionPosition: "bottom",
+          captionColor:    null,
+          zoomIntensity:   "normal",
+          pacing:          "normal",
+          visualCue:       null,
+          colorGrade:      "none",
+          audioMood:       "none",
+        },
+        reason: `Rule-based overlap-fill zone ${z + 1}`,
+      });
+    }
   }
 
   return clips;

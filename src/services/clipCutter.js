@@ -70,12 +70,20 @@ function faceCropCoords(srcW, srcH, cxNorm, cyNorm, outW, outH) {
 }
 
 // ─── faceCropCoordsZoomed ─────────────────────────────────────────────────────
-// Same as faceCropCoords but crops a smaller region first (= zoom in).
 // Used for split panels so each half fills its 540p slot with some presence.
-function faceCropCoordsZoomed(srcW, srcH, cxNorm, cyNorm, outW, outH, zoom = 1.0) {
+// isRight: true for the right-side person — clamps cropX to right half of source
+// so the two panels never overlap or show the same region.
+function faceCropCoordsZoomed(srcW, srcH, cxNorm, cyNorm, outW, outH, zoom = 1.0, isRight = false) {
   const cropH = Math.round(srcH / zoom);
   const cropW = Math.min(Math.round(cropH * (outW / outH)), srcW);
-  const cropX = clamp(Math.round(cxNorm * srcW - cropW / 2), 0, srcW - cropW);
+  const idealX = Math.round(cxNorm * srcW - cropW / 2);
+  // Left person: crop must start in left half (cropX + cropW <= srcW/2 + some slack)
+  // Right person: crop must start far enough right that it centers on the right face
+  // Core fix: clamp each side to its own half of the frame
+  const halfW = Math.round(srcW / 2);
+  const cropX = isRight
+    ? clamp(idealX, Math.max(0, halfW - Math.round(cropW * 0.3)), srcW - cropW)
+    : clamp(idealX, 0, Math.min(srcW - cropW, halfW + Math.round(cropW * 0.3)));
   const cropY = clamp(
     Math.round(cyNorm * srcH - cropH * 0.38),
     0,
@@ -137,13 +145,13 @@ function buildStaticFilterSpec(decision, cropHint, srcW, srcH, grade, fade) {
       srcW, srcH,
       decision.leftCxNorm  ?? 0.25,
       decision.leftCyNorm  ?? 0.4,
-      OUT_W, HALF_H, zoom
+      OUT_W, HALF_H, zoom, false
     );
     const R = faceCropCoordsZoomed(
       srcW, srcH,
       decision.rightCxNorm ?? 0.75,
       decision.rightCyNorm ?? 0.4,
-      OUT_W, HALF_H, zoom
+      OUT_W, HALF_H, zoom, true
     );
     const fc = [
       `[0:v]split[top_src][bot_src]`,
@@ -260,13 +268,25 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
     .reduce((acc, s) => acc + (s.endT - s.startT), 0);
   const isSplit = splitDuration / clipDuration > 0.4;
 
-  // Split-dominant clip (≥50% of raw frames): use stable averaged split positions.
-  // Lowered from 70%: podcasts with b-roll cutaways may never hit 70% split even
-  // when split IS the primary framing. 50% is the right commit threshold.
-  const rawSplitFrac = rawSegments.filter(s => s.decision.mode === "split").length / (rawSegments.length || 1);
-  if (rawSplitFrac >= 0.50) {
-    console.log(`[clipCutter] split-dominant (${(rawSplitFrac * 100).toFixed(0)}%) → stable split filter`);
+  // FIXED: Only use stable split rendering when there are NO face (1-person angle)
+  // segments mixed in. If there are face segments, use dynamic per-segment rendering
+  // so each camera angle (1-person vs 2-person) gets the correct layout.
+  //
+  // Old bug: rawSplitFrac >= 0.50 would collapse a clip with 60% split + 40% face
+  // into a single stable split, rendering the 1-person angles as split too.
+  const hasFaceSegments = segments.some(s => _isFaceMode(s.decision.mode));
+  const rawSplitFrac    = rawSegments.filter(s => s.decision.mode === "split").length / (rawSegments.length || 1);
+
+  if (rawSplitFrac >= 0.50 && !hasFaceSegments) {
+    console.log(`[clipCutter] split-dominant (${(rawSplitFrac * 100).toFixed(0)}%), no face angles → stable split filter`);
     return buildStableSplitFilterSpec(timeline, srcW, srcH, grade, fade);
+  }
+
+  if (rawSplitFrac >= 0.50 && hasFaceSegments) {
+    console.log(
+      `[clipCutter] split-dominant (${(rawSplitFrac * 100).toFixed(0)}%) but has ` +
+      `${segments.filter(s => _isFaceMode(s.decision.mode)).length} face angle(s) → dynamic per-segment render`
+    );
   }
 
   if (segments.length === 1) {
@@ -310,13 +330,13 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
         srcW, srcH,
         seg.decision.leftCxNorm  ?? 0.25,
         seg.decision.leftCyNorm  ?? 0.4,
-        OUT_W, HALF_H, zoom
+        OUT_W, HALF_H, zoom, false
       );
       const R = faceCropCoordsZoomed(
         srcW, srcH,
         seg.decision.rightCxNorm ?? 0.75,
         seg.decision.rightCyNorm ?? 0.4,
-        OUT_W, HALF_H, zoom
+        OUT_W, HALF_H, zoom, true
       );
       filterParts.push(`[seg${i}v_raw]split[seg${i}top_src][seg${i}bot_src]`);
       filterParts.push(

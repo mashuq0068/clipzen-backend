@@ -82,7 +82,11 @@ const SPLIT_MIN_AREA_RATIO      = 0.15;
 const SPLIT_MIN_FACE_AREA       = 0.006;
 const SPLIT_WIDE_LAYOUT_CX_DIFF = 0.50;
 const FACE_MIN_AREA             = 0.006;
-const SECOND_FACE_TINY_RATIO    = 0.18;
+// FIXED: raised from 0.18 → 0.25 so a second face needs to be at least 25%
+// of the primary face's area to be counted as a real second person.
+// At 0.18, background faces or partial detections were triggering split
+// even in genuine 1-person shots.
+const SECOND_FACE_TINY_RATIO    = 0.25;
 const SCENE_CHANGE_VOTE_WEIGHT  = 0.3;
 
 // ─── Grid vs in-person panel thresholds ──────────────────────────────────────
@@ -755,6 +759,22 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
 }
 
 // ─── Merge short segments ─────────────────────────────────────────────────────
+/**
+ * FIXED: When merging a short segment, we extend the neighbour's TIME RANGE
+ * but KEEP THE NEIGHBOUR'S DECISION — we do NOT inherit the short segment's
+ * layout. This means a 1-person (face) blip that is too short gets its time
+ * absorbed by its neighbour, but the neighbour's layout (split, blur_overlay,
+ * etc.) stays. Crucially, if the short segment is a different angle type than
+ * its neighbours (e.g. "face" sandwiched between two "split" segments), we
+ * choose the neighbour with the same mode if possible so we don't accidentally
+ * flip a genuine 1-person angle into split.
+ *
+ * KEY RULE ADDED: A "face" segment (1 person) is NEVER merged into a "split"
+ * segment if the face segment has at least MIN_FACE_PROTECT_SECS duration.
+ * This protects legitimate 1-person camera angles from being overwritten.
+ */
+const MIN_FACE_PROTECT_SECS = parseFloat(process.env.MIN_FACE_PROTECT_SECS || "2.0");
+
 function mergeShortSegments(segments, minSecs) {
   if (segments.length <= 1) return segments;
 
@@ -765,17 +785,39 @@ function mergeShortSegments(segments, minSecs) {
     changed = false;
     const out = [];
     for (let i = 0; i < segs.length; i++) {
-      const dur = segs[i].end - segs[i].start;
-      if (dur < minSecs && segs.length > 1) {
-        // Merge into previous if it exists, else next
-        if (out.length > 0) {
+      const dur  = segs[i].end - segs[i].start;
+      const mode = segs[i].decision.mode;
+
+      // Protect face segments that are long enough — never swallow them into split
+      const isFaceProtected =
+        (mode === "face" || _isFaceMode(mode)) &&
+        dur >= MIN_FACE_PROTECT_SECS;
+
+      if (dur < minSecs && segs.length > 1 && !isFaceProtected) {
+        const prevSeg = out.length > 0 ? out[out.length - 1] : null;
+        const nextSeg = i + 1 < segs.length ? segs[i + 1] : null;
+
+        // Prefer merging into a neighbour with the SAME mode (avoids cross-mode contamination)
+        const prevSameMode = prevSeg && prevSeg.decision.mode === mode;
+        const nextSameMode = nextSeg && nextSeg.decision.mode === mode;
+
+        if (prevSameMode) {
+          // Extend previous same-mode segment — its decision is already correct
           out[out.length - 1].end = segs[i].end;
           changed = true;
-        } else if (i + 1 < segs.length) {
+        } else if (nextSameMode) {
+          // Extend next same-mode segment backward
+          segs[i + 1] = { ...segs[i + 1], start: segs[i].start };
+          changed = true;
+        } else if (prevSeg) {
+          // No same-mode neighbour — extend previous (its decision wins)
+          out[out.length - 1].end = segs[i].end;
+          changed = true;
+        } else if (nextSeg) {
           segs[i + 1] = { ...segs[i + 1], start: segs[i].start };
           changed = true;
         }
-        // (drop segs[i] by not pushing it)
+        // Drop segs[i] by not pushing it
       } else {
         out.push({ ...segs[i] });
       }
@@ -851,6 +893,17 @@ function smoothTimeline(rawTimeline) {
         if (
           runMode === "split" && splitFrac >= 0.08 &&
           replacement && _isFaceMode(replacement.mode)
+        ) {
+          i = j; continue;
+        }
+
+        // FIXED: Symmetric guard — don't absorb a confirmed face (1-person angle)
+        // blip into split. A real camera cut to 1 person should stay as face.
+        const faceFrac = (result.filter(e => _isFaceMode(e.decision.mode)).length) /
+                         (result.length || 1);
+        if (
+          _isFaceMode(runMode) && faceFrac >= 0.05 &&
+          replacement && replacement.mode === "split"
         ) {
           i = j; continue;
         }

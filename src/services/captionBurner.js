@@ -26,7 +26,7 @@ const REMOTION_PROJECT = path.resolve(__dirname, "../../remotion-captions");
 //   FIX 4 — wordsPerLine: 2 + fontSize: 68 on wordpop/ticker/wordRed
 //   FIX 5 — activeColor brighter on ticker (#39E75F) and wordpop (#FFE500)
 // ─────────────────────────────────────────────────────────────
- const CAPTION_STYLES = {
+const CAPTION_STYLES = {
   ticker: {
     name: "ticker",
     layout: "bottom-center",
@@ -338,7 +338,8 @@ const REMOTION_PROJECT = path.resolve(__dirname, "../../remotion-captions");
     letterSpacing: "4px",
     activeStrategy: "shimmer",
     gradient:
-"linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",  },
+      "linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",
+  },
   retro_wave: {
     name: "retro_wave",
     layout: "bottom-center",
@@ -376,7 +377,6 @@ const REMOTION_PROJECT = path.resolve(__dirname, "../../remotion-captions");
     letterSpacing: "3px",
   },
 };
-
 
 // ─────────────────────────────────────────────────────────────
 // ICON / SFX PATH VALIDATION
@@ -958,12 +958,17 @@ async function burnCaptions(clip, contentType, platforms) {
     );
     console.log(`      Rendering...`);
 
+    // Pre-create Remotion audio mixing temp dir (Windows fix)
+    const os = require("os");
+    fs.mkdirSync(path.join(os.tmpdir(), "remotion-audio-mixing"), {
+      recursive: true,
+    });
+
     await execAsync(renderCmd, {
       cwd: REMOTION_PROJECT,
       timeout: 20 * 60 * 1000,
       env: { ...process.env },
     });
-
     if (!fs.existsSync(remotionOutput)) {
       console.warn("   ⚠️  Remotion output missing — returning original");
       return clip.filePath;

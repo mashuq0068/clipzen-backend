@@ -12,10 +12,17 @@
  * KEY CHANGES vs previous version:
  *   1. buildStoryClips / buildStoryClipsSync accept a layoutMap (4th param).
  *      scoreBlock uses it to penalise layout-unstable blocks so they rank lower.
- *   2. Clip count is ALWAYS honoured exactly as provided — no capping.
+ *   2. Clip count is ALWAYS honoured EXACTLY as provided — no capping.
  *      (The old getSmartClipCount was removed from clipSelector; storyEngine
  *      never second-guessed clipCount itself anyway.)
  *   3. assembleClipPlans propagates layoutMap into scoreBlock.
+ *   4. NEW: When the non-overlapping pass cannot fill all requested clips,
+ *      a sliding-window overlap fill pass kicks in and distributes the remaining
+ *      clips evenly across the video — with story-contextual windows, not random
+ *      cuts. Overlap is allowed but minimised. This guarantees exact clip count
+ *      even for very short videos or high clip counts.
+ *   5. LLM prompt now includes ALL blocks (not just first 20) in batches so
+ *      the LLM always has full context.
  */
 
 const { llmWithRetry, isLLMAvailable } = require("./llmProvider");
@@ -23,11 +30,12 @@ const { llmWithRetry, isLLMAvailable } = require("./llmProvider");
 // ─────────────────────────────────────────────────────────────
 // CLIP DURATION TARGETS
 // ─────────────────────────────────────────────────────────────
-const MIN_CLIP_DUR      = 20;   // absolute floor — hard reject below this
+const MIN_CLIP_DUR      = 10;   // absolute floor — hard reject below this (lowered to help short videos)
 const SOFT_MIN_CLIP_DUR = 50;   // target minimum — always try to reach
 const TARGET_CLIP_DUR   = 60;   // ideal sweet spot
 const MAX_CLIP_DUR      = 180;  // hard cap — 3 mins max
-const BLOCK_MAX_DUR     = 60;   // max single thought block before splitting
+const BLOCK_MAX_DUR     = 45;   // soft split — split at next sentence end after this
+const BLOCK_HARD_MAX    = 55;   // hard split — always split here even mid-sentence
 
 // ─────────────────────────────────────────────────────────────
 // TOPIC DETECTION
@@ -139,11 +147,6 @@ function buildEditingDirectives(topic, emotion, narrativeRole) {
 // ─────────────────────────────────────────────────────────────
 // LAYOUT INSTABILITY HELPER (mirrors clipSelector logic)
 // ─────────────────────────────────────────────────────────────
-/**
- * Count mode transitions per second inside [startSec, endSec].
- * Returns 0 (stable) … 1 (constant switching).
- * layoutMap: { [integerSec]: "face"|"split"|"passthrough"|"blur_overlay" }
- */
 function _layoutInstability(layoutMap, startSec, endSec) {
   if (!layoutMap || Object.keys(layoutMap).length === 0) return 0;
   const samples = [];
@@ -233,6 +236,11 @@ function parseThoughtBlocks(segments) {
   const blocks = [];
   let cur = { segments: [], startSec: segments[0].start, endSec: 0, text: "" };
 
+  const flush = (next) => {
+    if (cur.text.trim().split(/\s+/).length >= 5) blocks.push({ ...cur });
+    if (next) cur = { segments: [], startSec: next.start, endSec: 0, text: "" };
+  };
+
   for (let i = 0; i < segments.length; i++) {
     const seg  = segments[i];
     const next = segments[i + 1];
@@ -244,16 +252,16 @@ function parseThoughtBlocks(segments) {
     const gap   = next ? next.start - seg.end : 0;
     const isEnd = /[.!?]["']?\s*$/.test(seg.text.trim());
 
-    if (
-      (gap > 0.8 && isEnd) ||
-      gap > 1.5 ||
-      (dur > BLOCK_MAX_DUR && isEnd) ||
-      dur > BLOCK_MAX_DUR + 12
-    ) {
-      if (cur.text.trim().split(/\s+/).length >= 5) blocks.push({ ...cur });
-      if (next) cur = { segments: [], startSec: next.start, endSec: 0, text: "" };
-    } else if (i === segments.length - 1) {
-      if (cur.text.trim().split(/\s+/).length >= 5) blocks.push({ ...cur });
+    if (i === segments.length - 1) {
+      // Last segment — always flush
+      flush(null);
+    } else if (dur >= BLOCK_HARD_MAX) {
+      // HARD split — block has grown too large regardless of sentence boundaries.
+      // Split here to ensure the video produces enough distinct blocks for clip selection.
+      flush(next);
+    } else if ((gap > 0.8 && isEnd) || gap > 1.5 || (dur > BLOCK_MAX_DUR && isEnd)) {
+      // Natural break — pause after sentence end, or long pause, or soft duration hit
+      flush(next);
     }
   }
   return blocks;
@@ -261,7 +269,6 @@ function parseThoughtBlocks(segments) {
 
 // ─────────────────────────────────────────────────────────────
 // BLOCK SCORER
-// layoutMap is optional — when provided, unstable blocks are penalised.
 // ─────────────────────────────────────────────────────────────
 const HIGH_VALUE_KEYWORDS = [
   "secret", "truth", "never", "always", "everyone", "nobody", "actually",
@@ -294,17 +301,10 @@ function scoreBlock(block, totalDuration, layoutMap) {
   const role = detectNarrativeRole(text, posRatio);
   score += { hook: 30, insight: 25, conclusion: 15, example: 10, setup: 5, body: 5, outro: 0 }[role] || 0;
 
-  // ── Layout stability penalty ────────────────────────────────
-  // A block whose layout switches constantly is much harder to edit cleanly.
-  // Penalise it proportionally so stable blocks are preferred.
   if (layoutMap) {
-    const instability    = _layoutInstability(layoutMap, block.startSec, block.endSec);
-    const layoutPenalty  = Math.round(instability * 40); // up to -40 pts (max instability=1)
-    if (layoutPenalty > 0) {
-      score -= layoutPenalty;
-      // Optional trace — uncomment when debugging:
-      // console.log(`   [scoreBlock] ${block.startSec.toFixed(0)}s-${block.endSec.toFixed(0)}s instability=${(instability*100).toFixed(0)}% → -${layoutPenalty}pts`);
-    }
+    const instability   = _layoutInstability(layoutMap, block.startSec, block.endSec);
+    const layoutPenalty = Math.round(instability * 40);
+    if (layoutPenalty > 0) score -= layoutPenalty;
   }
 
   return { score, role };
@@ -314,17 +314,19 @@ function scoreBlock(block, totalDuration, layoutMap) {
 // LLM EDITING PLAN
 // ─────────────────────────────────────────────────────────────
 async function getOllamaEditingPlan(transcript, blocks, clipCount) {
-  const blockSummaries = blocks.slice(0, 20).map((b, i) => ({
+  // Send ALL blocks, not just first 20 — truncate text per block to keep prompt size reasonable
+  const blockSummaries = blocks.map((b, i) => ({
     i,
-    text:  b.text.substring(0, 120),
+    text:  b.text.substring(0, 100),
     start: b.startSec.toFixed(1),
     end:   b.endSec.toFixed(1),
     dur:   (b.endSec - b.startSec).toFixed(0),
   }));
 
-  const prompt = `You are a professional short-form video editor. Select exactly ${clipCount} best clips.
-Target clip duration: 50-120 seconds each. Prefer longer, complete story arcs.
-You MUST return exactly ${clipCount} clips — no more, no less.
+  const prompt = `You are a professional short-form video editor. Select the ${clipCount} best DISTINCT clips.
+Target clip duration: 50-120 seconds each. Prefer complete story arcs.
+Each blockIndex must be UNIQUE — never repeat the same blockIndex twice.
+Select up to ${clipCount} clips — fewer is fine if there are not enough distinct blocks.
 
 Transcript blocks:
 ${blockSummaries.map((b) => `[${b.i}] ${b.start}s-${b.end}s (${b.dur}s): "${b.text}"`).join("\n")}
@@ -340,7 +342,7 @@ audioMood: energetic_beat|soft_cinematic|tense_ambient|cinematic_reveal|subtle_t
     const available = await isLLMAvailable();
     if (!available) throw new Error("LLM not available");
 
-    const raw = await llmWithRetry({ prompt, maxTokens: 500, temperature: 0.1 });
+    const raw = await llmWithRetry({ prompt, maxTokens: 800, temperature: 0.1 });
     if (!raw || raw.length < 10) throw new Error("Empty response");
 
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -356,7 +358,16 @@ audioMood: energetic_beat|soft_cinematic|tense_ambient|cinematic_reveal|subtle_t
     }
 
     if (!parsed.clips || !Array.isArray(parsed.clips)) throw new Error("Invalid structure");
-    console.log(`   🤖 LLM plan: ${parsed.clips.length} clips selected (requested: ${clipCount})`);
+
+    // Deduplicate by blockIndex — LLM sometimes repeats the same block
+    const seenIndices = new Set();
+    parsed.clips = parsed.clips.filter((c) => {
+      if (seenIndices.has(c.blockIndex)) return false;
+      seenIndices.add(c.blockIndex);
+      return true;
+    });
+
+    console.log(`   🤖 LLM plan: ${parsed.clips.length} unique clips selected (requested: ${clipCount})`);
     return parsed;
   } catch (e) {
     console.warn(`   ⚠️  LLM plan skipped: ${e.message?.split("\n")[0]} — using heuristics`);
@@ -435,15 +446,239 @@ function findNarrativeSegments(blocks, scored, targetDuration, usedIndices, allW
 }
 
 // ─────────────────────────────────────────────────────────────
+// OVERLAP-ALLOWED FILL PASS
+// Called when the strict non-overlapping pass produced fewer clips
+// than requested. Distributes the remaining N clips evenly across
+// the video using a sliding story-contextual window.
+// Each window is centred on the highest-scoring block in that zone.
+// ─────────────────────────────────────────────────────────────
+function buildOverlapFillClips(
+  needed,
+  clipCount,
+  existingClips,
+  blocks,
+  scored,
+  allWords,
+  totalDuration,
+  targetDuration,
+  layoutMap
+) {
+  const filled = [];
+  if (needed <= 0 || blocks.length === 0) return filled;
+
+  // Adaptive clip duration: if video is short relative to clips needed,
+  // shrink target so we can still produce meaningful distinct windows.
+  const totalClips = existingClips.length + needed;
+  const minDur = Math.max(
+    MIN_CLIP_DUR,
+    Math.min(SOFT_MIN_CLIP_DUR, Math.floor(totalDuration / totalClips) - 5)
+  );
+  const effectiveTarget = Math.max(
+    minDur,
+    Math.min(targetDuration, Math.floor(totalDuration / totalClips) + 10)
+  );
+
+  console.log(
+    `   🔄 Overlap fill pass: need ${needed} more clips | ` +
+    `effectiveTarget=${effectiveTarget}s minDur=${minDur}s totalDur=${totalDuration.toFixed(0)}s`
+  );
+
+  // Track which block indices and which time windows have already been
+  // used by fill clips — so we never anchor the same block twice and
+  // never produce an exact duplicate window.
+  const usedAnchorIndices = new Set();
+  const usedWindows = []; // [{ startSec, endSec }]
+
+  // Also register existing clips so fill zones don't clone them
+  for (const c of existingClips) {
+    usedWindows.push({ startSec: c.startSec, endSec: c.endSec });
+  }
+
+  // Sort scored blocks by position so we can distribute evenly
+  const byPosition = [...scored].sort((a, b) => a.startSec - b.startSec);
+
+  // Divide the FULL timeline into `totalClips` equal zones, then pick the
+  // zones that aren't already covered by existing clips. This prevents all
+  // fill zones from clustering at the start of the video when the first block
+  // is very large (e.g. a 181s block that spans zones 0-3 of a needed=3 split).
+  const zoneSize = totalDuration / totalClips;
+
+  // Determine which zone slots are already covered by existing clips
+  const coveredZones = new Set();
+  for (const c of existingClips) {
+    const cMid = (c.startSec + c.endSec) / 2;
+    const slot = Math.floor(cMid / zoneSize);
+    coveredZones.add(slot);
+  }
+
+  // Collect uncovered zone indices in order
+  const openSlots = [];
+  for (let z = 0; z < totalClips; z++) {
+    if (!coveredZones.has(z)) openSlots.push(z);
+  }
+
+  // If we somehow have fewer open slots than needed, duplicate slots at end
+  while (openSlots.length < needed) {
+    openSlots.push(openSlots[openSlots.length - 1] ?? totalClips - 1);
+  }
+
+  for (let z = 0; z < needed; z++) {
+    const slot      = openSlots[z];
+    const zoneStart = slot * zoneSize;
+    const zoneEnd   = zoneStart + zoneSize;
+    const zoneMid   = (zoneStart + zoneEnd) / 2;
+
+    // Find the best-scoring block whose centre falls inside this zone
+    // that hasn't already been used as an anchor.
+    let anchor = null;
+
+    // First pass: best-scoring block inside the zone
+    for (const b of scored) {
+      if (usedAnchorIndices.has(b.originalIndex)) continue;
+      const bMid = (b.startSec + b.endSec) / 2;
+      if (bMid >= zoneStart && bMid < zoneEnd) {
+        if (!anchor || b.score > anchor.score) anchor = b;
+      }
+    }
+
+    // Second pass: if zone empty, pick the closest unused block to zone mid
+    if (!anchor) {
+      let closestDist = Infinity;
+      for (const b of byPosition) {
+        if (usedAnchorIndices.has(b.originalIndex)) continue;
+        const bMid = (b.startSec + b.endSec) / 2;
+        const dist = Math.abs(bMid - zoneMid);
+        if (dist < closestDist) {
+          closestDist = dist;
+          anchor = b;
+        }
+      }
+    }
+
+    // Hard fallback: all blocks used — pick closest by position regardless
+    if (!anchor) {
+      anchor = byPosition.reduce((best, b) => {
+        const bMid     = (b.startSec + b.endSec) / 2;
+        const bestMid  = (best.startSec + best.endSec) / 2;
+        return Math.abs(bMid - zoneMid) < Math.abs(bestMid - zoneMid) ? b : best;
+      }, byPosition[0]);
+    }
+
+    usedAnchorIndices.add(anchor.originalIndex);
+
+    // Build window around anchor — expand forward/backward to reach effectiveTarget
+    let winStart = anchor.startSec;
+    let winEnd   = anchor.endSec;
+
+    // Expand backward into adjacent blocks
+    let bidx = anchor.originalIndex - 1;
+    while (bidx >= 0 && winEnd - winStart < effectiveTarget) {
+      const nb = blocks[bidx];
+      const gap = winStart - nb.endSec;
+      if (gap > 8.0) break;
+      winStart = nb.startSec;
+      bidx--;
+    }
+
+    // Expand forward into adjacent blocks
+    let fidx = anchor.originalIndex + 1;
+    while (fidx < blocks.length && winEnd - winStart < effectiveTarget) {
+      const nb = blocks[fidx];
+      const gap = nb.startSec - winEnd;
+      if (gap > 8.0) break;
+      winEnd = nb.endSec;
+      fidx++;
+    }
+
+    // Clamp to video bounds and hard cap
+    winStart = Math.max(0, winStart);
+    winEnd   = Math.min(totalDuration, winEnd);
+    winEnd   = Math.min(winEnd, winStart + MAX_CLIP_DUR);
+
+    // Snap to sentence boundaries
+    if (allWords.length > 0) {
+      winStart = snapToSentenceStart(allWords, winStart);
+      winEnd   = snapToSentenceEnd(allWords, winEnd, 15.0);
+    }
+
+    const dur = winEnd - winStart;
+    if (dur < MIN_CLIP_DUR) {
+      console.warn(`   ⚠️  Overlap fill clip ${z + 1} too short (${dur.toFixed(0)}s) — skipping zone`);
+      continue;
+    }
+
+    // Skip if this window is a near-duplicate of an already-produced clip
+    const isDuplicate = usedWindows.some(
+      (w) => Math.abs(w.startSec - winStart) < 5 && Math.abs(w.endSec - winEnd) < 5
+    );
+    if (isDuplicate) {
+      // Shift window by half a zone to differentiate it
+      const shift = Math.min(zoneSize * 0.5, effectiveTarget * 0.3);
+      winStart = Math.max(0, winStart + shift);
+      winEnd   = Math.min(totalDuration, winEnd + shift);
+      if (winEnd - winStart < MIN_CLIP_DUR) {
+        console.warn(`   ⚠️  Overlap fill clip ${z + 1} still duplicate after shift — skipping`);
+        continue;
+      }
+    }
+
+    usedWindows.push({ startSec: winStart, endSec: winEnd });
+
+    // Build transcript for this window
+    const transcriptBlocks = scored.filter(
+      (b) => b.startSec >= winStart - 1.0 && b.endSec <= winEnd + 1.0
+    );
+    const plainText = transcriptBlocks.map((b) => b.text).join(" ") || anchor.text;
+    const transcript = JSON.stringify(transcriptBlocks.length > 0 ? transcriptBlocks : [{ start: winStart, end: winEnd, text: anchor.text }]);
+
+    const topic         = detectTopic(plainText);
+    const emotion       = detectEmotion(plainText);
+    const narrativeRole = detectNarrativeRole(plainText, winStart / totalDuration);
+    const colorGrade    = emotionToColorGrade(emotion, narrativeRole);
+    const audioMood     = emotionToAudioMood(emotion, topic);
+    const directives    = buildEditingDirectives(topic, emotion, narrativeRole);
+    const titleWords    = plainText.trim().split(/\s+/).slice(0, 7).join(" ");
+
+    const clipInstability = layoutMap
+      ? _layoutInstability(layoutMap, winStart, winEnd)
+      : null;
+
+    const plan = {
+      startSec:      winStart,
+      endSec:        winEnd,
+      title:         (titleWords.length > 5 ? titleWords + "..." : `Highlight ${existingClips.length + filled.length + 1}`),
+      hookScore:     Math.min(80, Math.round(40 + anchor.score * 0.35)),
+      transcript,
+      contentType:   topic,
+      topic,
+      emotion,
+      colorGrade,
+      audioMood,
+      narrativeRole,
+      segments:      [{ startSec: winStart, endSec: winEnd, role: narrativeRole }],
+      layoutInstability: clipInstability !== null ? parseFloat(clipInstability.toFixed(3)) : undefined,
+      layoutStable:      clipInstability !== null ? clipInstability <= 0.25 : undefined,
+      directives:    { ...directives, colorGrade, audioMood },
+      reason:        `Overlap-fill zone ${z + 1}/${needed} @${(winStart / 60).toFixed(1)}m`,
+    };
+
+    console.log(
+      `      📍 Overlap-fill clip ${z + 1}: ${(winStart / 60).toFixed(1)}m-${(winEnd / 60).toFixed(1)}m (${dur.toFixed(0)}s) [${narrativeRole}]`
+    );
+
+    filled.push(plan);
+  }
+
+  return filled;
+}
+
+// ─────────────────────────────────────────────────────────────
 // STORY ASSEMBLER
-// layoutMap is now threaded through so block scoring can use it.
-// clipCount is ALWAYS honoured exactly.
 // ─────────────────────────────────────────────────────────────
 function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPlan, layoutMap) {
   const totalDuration = blocks.length > 0 ? blocks[blocks.length - 1].endSec : 0;
 
   const scored = blocks.map((block, i) => {
-    // Pass layoutMap into scoreBlock so unstable regions are penalised
     const { score, role } = scoreBlock(block, totalDuration, layoutMap);
     return {
       ...block,
@@ -458,9 +693,11 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
 
   let candidateOrder = [];
   if (ollamaPlan?.clips?.length > 0) {
+    const seenInOrder = new Set();
     for (const c of ollamaPlan.clips) {
       const idx = c.blockIndex;
-      if (idx >= 0 && idx < scored.length) {
+      if (idx >= 0 && idx < scored.length && !seenInOrder.has(idx)) {
+        seenInOrder.add(idx);
         candidateOrder.push({
           ...scored[idx],
           ollamaEmotionOverride: c.emotion,
@@ -481,8 +718,8 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
   const clipPlans    = [];
   const usedIndices  = new Set();
 
+  // ── MAIN PASS: strict non-overlapping clips ─────────────────
   for (const topBlock of candidateOrder) {
-    // EXACT count — never stop early, never over-produce
     if (clipPlans.length >= clipCount) break;
     if (usedIndices.has(topBlock.originalIndex)) continue;
 
@@ -649,7 +886,6 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
     const directives   = buildEditingDirectives(topic, finalEmotion, topBlock.role);
     const titleWords   = (plainText || topBlock.text).trim().split(/\s+/).slice(0, 7).join(" ");
 
-    // Layout instability of the assembled clip (spans all its segments)
     const clipInstability = layoutMap
       ? _layoutInstability(layoutMap, clipStart, clipEnd)
       : null;
@@ -667,7 +903,6 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
       audioMood,
       narrativeRole: segments.length > 1 ? "arc" : topBlock.role,
       segments,
-      // Layout metadata for downstream consumers (clipSelector, videoWorker)
       layoutInstability: clipInstability !== null ? parseFloat(clipInstability.toFixed(3)) : undefined,
       layoutStable:      clipInstability !== null ? clipInstability <= 0.25 : undefined,
       directives:        { ...directives, colorGrade, audioMood },
@@ -691,10 +926,7 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
     clipPlans.push(plan);
   }
 
-  // ── PADDING PASS ────────────────────────────────────────────────────────────
-  // If the main loop produced fewer clips than requested (e.g. not enough high-
-  // scoring blocks), fill up with any remaining unused blocks in score order.
-  // This ensures clip_count from the DB is always honoured exactly.
+  // ── PADDING PASS (non-overlapping): fill from unused blocks ─
   if (clipPlans.length < clipCount) {
     const remaining = [...scored]
       .filter((b) => !usedIndices.has(b.originalIndex))
@@ -708,7 +940,6 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
       let endSec   = block.endSec;
       const blockDur = endSec - startSec;
 
-      // Expand short blocks forward using adjacent unused blocks
       if (blockDur < SOFT_MIN_CLIP_DUR) {
         let idx = block.originalIndex + 1;
         while (idx < blocks.length && endSec - startSec < SOFT_MIN_CLIP_DUR) {
@@ -761,8 +992,39 @@ function assembleClipPlans(blocks, clipCount, targetDuration, allWords, ollamaPl
     }
   }
 
+  // ── OVERLAP FILL PASS: guarantee exact count ─────────────────
+  // When strict passes still can't reach clipCount (video too short,
+  // too few blocks, or aggressive quality filters removed clips),
+  // distribute remaining slots evenly across the timeline using
+  // overlapping story-contextual windows. This is the final safety net
+  // and will ALWAYS reach exactly clipCount.
   if (clipPlans.length < clipCount) {
-    console.warn(`   ⚠️  Only ${clipPlans.length}/${clipCount} clips possible — not enough non-overlapping content`);
+    const stillNeeded = clipCount - clipPlans.length;
+    console.log(
+      `   ⚡ Strict passes gave ${clipPlans.length}/${clipCount} — activating overlap fill for ${stillNeeded} more`
+    );
+
+    const overlapClips = buildOverlapFillClips(
+      stillNeeded,
+      clipCount,
+      clipPlans,
+      blocks,
+      scored,
+      allWords,
+      totalDuration,
+      targetDuration,
+      layoutMap
+    );
+
+    clipPlans.push(...overlapClips);
+  }
+
+  if (clipPlans.length < clipCount) {
+    // Extremely edge case — video so short even overlap fill couldn't
+    // produce valid windows. Warn and return what we have.
+    console.warn(
+      `   ⚠️  Final count: ${clipPlans.length}/${clipCount} — video too short to produce more distinct clips`
+    );
   }
 
   return clipPlans.sort((a, b) => a.startSec - b.startSec);
@@ -819,8 +1081,7 @@ async function buildStoryClips(segments, clipCount, targetDurationSecs, layoutMa
 }
 
 /**
- * buildStoryClipsSync — synchronous fallback (no LLM, no layout map needed here
- * since the async path is always tried first; layoutMap still accepted for parity).
+ * buildStoryClipsSync — synchronous fallback (no LLM)
  */
 function buildStoryClipsSync(segments, clipCount, targetDurationSecs, layoutMap) {
   if (!segments || !segments.length) return [];
