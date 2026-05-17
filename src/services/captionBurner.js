@@ -1,3 +1,4 @@
+/* eslint-disable no-empty */
 const JOB_STYLE_CACHE = new Map();
 
 const { exec, execFile } = require("child_process");
@@ -831,14 +832,40 @@ async function burnCaptions(clip, contentType, platforms) {
     if (brollSegments.length > 0) {
       brollServer = await startVideoServer(jobDir, mainFileName);
       brollServerInstance = brollServer.server;
-      brollSegments = brollSegments.map((seg) => {
-        if (!seg.videoUrl || seg.videoUrl.startsWith("http")) return seg;
-        const rel = path.relative(jobDir, seg.videoUrl).replace(/\\/g, "/");
-        return {
-          ...seg,
-          videoUrl: `http://127.0.0.1:${brollServer.port}/${rel}`,
-        };
-      });
+      const localBrollDir = path.join(jobDir, "broll");
+      fs.mkdirSync(localBrollDir, { recursive: true });
+
+      brollSegments = brollSegments
+        .map((seg) => {
+          if (!seg.videoUrl || seg.videoUrl.startsWith("http")) return seg;
+
+          let localVideoUrl = seg.videoUrl;
+
+          // If file is outside this job's folder, copy it in first
+          if (!path.resolve(seg.videoUrl).startsWith(path.resolve(jobDir))) {
+            const destPath = path.join(
+              localBrollDir,
+              path.basename(seg.videoUrl),
+            );
+            try {
+              if (fs.existsSync(seg.videoUrl) && !fs.existsSync(destPath)) {
+                fs.copyFileSync(seg.videoUrl, destPath);
+              }
+              localVideoUrl = fs.existsSync(destPath) ? destPath : null;
+            } catch {
+              localVideoUrl = null;
+            }
+          }
+
+          if (!localVideoUrl) return null; // will be filtered out below
+
+          const rel = path.relative(jobDir, localVideoUrl).replace(/\\/g, "/");
+          return {
+            ...seg,
+            videoUrl: `http://127.0.0.1:${brollServer.port}/${rel}`,
+          };
+        })
+        .filter(Boolean); // drop segments where file was missing/uncopyable
     }
 
     // ── EVENTS ────────────────────────────────────────────────
@@ -958,17 +985,57 @@ async function burnCaptions(clip, contentType, platforms) {
     );
     console.log(`      Rendering...`);
 
-    // Pre-create Remotion audio mixing temp dir (Windows fix)
+    // Windows fix: Remotion creates a uniquely-named temp dir like
+    // remotion-v4.x.x-assetsXXX/remotion-audio-mixing/ inside os.tmpdir().
+    // On Windows the parent sometimes doesn't exist yet when ffmpeg tries to
+    // write into it, causing "No such file or directory" and exit code
+    // 4294967294. We can't pre-create the exact path (it's random), but we
+    // CAN set TEMP/TMP to a stable dir we own so Remotion's temp root always
+    // exists. We also retry once on that specific failure.
     const os = require("os");
-    fs.mkdirSync(path.join(os.tmpdir(), "remotion-audio-mixing"), {
-      recursive: true,
-    });
+    const stableTemp = path.join(os.tmpdir(), "remotion-stable-temp");
+    fs.mkdirSync(stableTemp, { recursive: true });
 
-    await execAsync(renderCmd, {
-      cwd: REMOTION_PROJECT,
-      timeout: 20 * 60 * 1000,
-      env: { ...process.env },
-    });
+    const renderEnv = {
+      ...process.env,
+      TEMP: stableTemp,
+      TMP: stableTemp,
+    };
+
+    const runRender = () =>
+      execAsync(renderCmd, {
+        cwd: REMOTION_PROJECT,
+        timeout: 20 * 60 * 1000,
+        env: renderEnv,
+      });
+
+    let renderErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await runRender();
+        renderErr = null;
+        break;
+      } catch (e) {
+        renderErr = e;
+        const isAudioMixingCrash =
+          e.message &&
+          (e.message.includes("remotion-audio-mixing") ||
+            e.message.includes("No such file or directory") ||
+            e.code === 4294967294 ||
+            String(e.code) === "4294967294");
+        if (attempt === 1 && isAudioMixingCrash) {
+          console.warn(
+            `      ⚠️  Remotion audio-mixing dir crash (attempt 1) — retrying...`,
+          );
+          // Give the OS a moment then retry
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (renderErr) throw renderErr;
+
     if (!fs.existsSync(remotionOutput)) {
       console.warn("   ⚠️  Remotion output missing — returning original");
       return clip.filePath;
@@ -1036,6 +1103,7 @@ async function burnCaptions(clip, contentType, platforms) {
     if (publicVideoPath) {
       try {
         fs.unlinkSync(publicVideoPath);
+        // eslint-disable-next-line no-empty
       } catch (e) {}
     }
     if (propsFile) {
