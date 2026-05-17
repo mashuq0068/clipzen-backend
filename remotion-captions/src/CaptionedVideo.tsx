@@ -1,5 +1,3 @@
-
-
 import React from "react";
 import {
   AbsoluteFill,
@@ -14,7 +12,23 @@ import {
 } from "remotion";
 
 // ─────────────────────────────────────────────────────────────
+// VIDEO SRC RESOLVER
+//
+// captionBurner passes mainVideoUrl as a full HTTP URL served by
+// the local broll server. staticFile() hard-crashes on remote URLs.
+// resolveVideoSrc() passes HTTP URLs through and only calls
+// staticFile() for local asset names like "video_xxx.mp4".
+// ─────────────────────────────────────────────────────────────
+function resolveVideoSrc(src: string): string {
+  if (src.startsWith("http://") || src.startsWith("https://")) {
+    return src;
+  }
+  return staticFile(src);
+}
+
+// ─────────────────────────────────────────────────────────────
 // TYPES
+
 // ─────────────────────────────────────────────────────────────
 export interface StyleConfig {
   extrudeColor?: string;
@@ -1090,8 +1104,8 @@ export const CaptionedVideo: React.FC<Props> = ({
   if (allDone || activeIdx < 0) {
     return (
       <AbsoluteFill style={{ overflow: "hidden" }}>
-        <Video
-          src={staticFile(videoSrc)}
+        <OffthreadVideo
+          src={resolveVideoSrc(videoSrc)}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
         {brollSegments.map((seg, i) => (
@@ -1146,8 +1160,8 @@ export const CaptionedVideo: React.FC<Props> = ({
 
   return (
     <AbsoluteFill style={{ overflow: "hidden" }}>
-      <Video
-        src={staticFile(videoSrc)}
+      <OffthreadVideo
+        src={resolveVideoSrc(videoSrc)}
         style={{ width: "100%", height: "100%", objectFit: "cover" }}
       />
       {brollSegments.map((seg, i) => (

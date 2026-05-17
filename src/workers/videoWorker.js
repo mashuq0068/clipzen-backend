@@ -22,6 +22,12 @@ const handleTranscribe = require("../handlers/transcribe");
 const handleEditVideo = require("../handlers/editVideo");
 const handleBrollOnly = require("../handlers/brollOnly");
 
+// ── PERF: Warm the Remotion bundle immediately at worker startup.
+// By the time the first job arrives the bundle is already compiled
+// and cached — clips skip the 15-30s cold start entirely.
+const { warmBundle } = require("../services/remotionBundle");
+warmBundle(); // fire-and-forget, errors are non-fatal
+
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "localhost",
   port: parseInt(process.env.REDIS_PORT, 10) || 6379,
