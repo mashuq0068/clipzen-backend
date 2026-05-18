@@ -8,8 +8,22 @@ const { Worker } = require("bullmq");
 const IORedis = require("ioredis");
 const { query } = require("../db/pool");
 const { downloadVideo } = require("../services/downloader");
-const { extractJobThumbnail } = require("../services/thumbnailExtractor");
+const { extractJobThumbnail, getVideoDurationSec } = require("../services/thumbnailExtractor");
 const fs = require("fs");
+
+function parseDurationToSeconds(durationStr) {
+  if (!durationStr || typeof durationStr !== "string") return 0;
+  const parts = durationStr.split(":").map(Number);
+  let secs = 0;
+  if (parts.length === 3) {
+    secs = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  } else if (parts.length === 2) {
+    secs = parts[0] * 60 + parts[1];
+  } else if (parts.length === 1) {
+    secs = parts[0];
+  }
+  return isNaN(secs) ? 0 : secs;
+}
 
 // Import Helpers
 const workerHelpers = require("../utils/workerHelpers");
@@ -64,7 +78,7 @@ const worker = new Worker(
         originalDuration = result.duration;
         downloadedLocally = true;
 
-        const jobThumbnailUrl = await extractJobThumbnail(videoPath, jobId);
+        const jobThumbnailUrl = await extractJobThumbnail(videoPath, jobId, dbJob.source_url);
         if (jobThumbnailUrl) {
           await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [
             jobThumbnailUrl,
@@ -75,6 +89,16 @@ const worker = new Worker(
         videoPath = dbJob.source_file_path;
         if (!videoPath || !fs.existsSync(videoPath))
           throw new Error(`File not found: ${videoPath}`);
+        
+        // Extract and format uploaded video's duration
+        const durationSecs = await getVideoDurationSec(videoPath);
+        const formatDuration = (secs) => {
+          const m = Math.floor(secs / 60);
+          const s = Math.floor(secs % 60);
+          return `${m}:${s.toString().padStart(2, "0")}`;
+        };
+        originalDuration = formatDuration(durationSecs);
+
         const jobThumbnailUrl = await extractJobThumbnail(videoPath, jobId);
         if (jobThumbnailUrl) {
           await query("UPDATE jobs SET thumbnail_url = $1 WHERE id = $2", [
@@ -89,15 +113,28 @@ const worker = new Worker(
         [videoTitle, originalDuration, jobId],
       );
 
-      // Duration check for specific services (max 5 mins = 300s)
-      if (jobType === "edit-video" || jobType === "b-roll") {
-        const durMatch = originalDuration.match(/(\d+):(\d+)/);
-        if (durMatch) {
-          const mins = parseInt(durMatch[1]);
-          if (mins >= 5)
-            throw new Error(
-              "Video too long. Max duration for this service is 5 minutes.",
-            );
+      // Strict duration validation:
+      // - magic-clips: max 2.5 hours (9000 seconds)
+      // - all other cases: max 5 minutes (300 seconds)
+      const durationSeconds = parseDurationToSeconds(originalDuration);
+      if (jobType === "magic-clips") {
+        if (durationSeconds > 9000) {
+          throw new Error(
+            "Video too long. Max duration for Magic Clips is 2 hours and 30 minutes."
+          );
+        }
+      } else {
+        if (durationSeconds > 300) {
+          const serviceTitle = {
+            "add-captions": "Add Captions",
+            "reframer": "Auto Reframe",
+            "transcribe": "Transcribe",
+            "edit-video": "Edit Video",
+            "b-roll": "Add B-Roll"
+          }[jobType] || jobType;
+          throw new Error(
+            `Video too long. Max duration for ${serviceTitle} is 5 minutes.`
+          );
         }
       }
 

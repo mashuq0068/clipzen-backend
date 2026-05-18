@@ -21,6 +21,24 @@ const path = require("path");
 const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
+const axios = require("axios");
+
+/**
+ * Downloads a remote image and saves it to the local filesystem.
+ */
+async function downloadImage(url, outputPath) {
+  const writer = fs.createWriteStream(outputPath);
+  const response = await axios({
+    url,
+    method: "GET",
+    responseType: "stream",
+  });
+  response.data.pipe(writer);
+  return new Promise((resolve, reject) => {
+    writer.on("finish", resolve);
+    writer.on("error", reject);
+  });
+}
 
 // Base directory where all job outputs live — adjust if your OUTPUT_DIR differs
 const OUTPUT_BASE = process.env.OUTPUT_DIR || path.resolve(__dirname, "../../outputs");
@@ -87,15 +105,34 @@ async function extractFrame(videoPath, seekSec, outputPath) {
  *
  * @param {string} videoPath - Absolute path to the downloaded/uploaded video
  * @param {string} jobId     - Job UUID (used for the output folder)
+ * @param {string} sourceUrl - Optional source URL to extract original thumbnail
  * @returns {Promise<string|null>} Relative URL like "/outputs/<jobId>/thumbnails/job_thumb.jpg"
  *                                 or null on failure
  */
-async function extractJobThumbnail(videoPath, jobId) {
-  try {
-    const thumbDir = path.join(OUTPUT_BASE, jobId, "thumbnails");
-    ensureDir(thumbDir);
+async function extractJobThumbnail(videoPath, jobId, sourceUrl = null) {
+  const thumbDir = path.join(OUTPUT_BASE, jobId, "thumbnails");
+  ensureDir(thumbDir);
+  const outputPath = path.join(thumbDir, "job_thumb.jpg");
 
-    const outputPath = path.join(thumbDir, "job_thumb.jpg");
+  try {
+    if (sourceUrl) {
+      const regExp = /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+      const match = sourceUrl.match(regExp);
+      if (match && match[1]) {
+        const ytThumb = `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`;
+        console.log(`  🖼️  Downloading YouTube thumbnail → ${ytThumb}`);
+        try {
+          await downloadImage(ytThumb, outputPath);
+          if (fs.existsSync(outputPath)) {
+            const relUrl = `/outputs/${jobId}/thumbnails/job_thumb.jpg`;
+            console.log(`  🖼️  YouTube thumbnail downloaded successfully → ${relUrl}`);
+            return relUrl;
+          }
+        } catch (downloadErr) {
+          console.warn(`  ⚠️  YouTube thumbnail download failed, falling back to frame extraction: ${downloadErr.message}`);
+        }
+      }
+    }
     const durationSec = await getVideoDurationSec(videoPath);
 
     // Seek to 10% in; clamp so we never go past the end
@@ -161,4 +198,5 @@ async function extractClipThumbnail(clipFilePath, jobId, clipId) {
 module.exports = {
   extractJobThumbnail,
   extractClipThumbnail,
+  getVideoDurationSec,
 };

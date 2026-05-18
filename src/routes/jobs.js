@@ -92,6 +92,17 @@ router.post(
 
       const usedThisMonth = parseInt(usageRows[0].count, 10);
 
+      let initialThumbnailUrl = null;
+      if (sourceType === "url" && sourceUrl) {
+        const regExp = /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+        const match = sourceUrl.match(regExp);
+        if (match && match[1]) {
+          initialThumbnailUrl = `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`;
+        }
+      }
+
+      const videoTitleVal = sourceType === "upload" && req.file ? req.file.originalname : "Untitled Video";
+
       // INSERT JOB
       const { rows } = await query(
         `INSERT INTO jobs
@@ -110,10 +121,12 @@ router.post(
           caption_style,
           broll_enabled,
           broll_style,
-          job_type   
+          job_type,
+          thumbnail_url,
+          video_title
         )
         VALUES
-        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         RETURNING *`,
         [
           req.user.id,
@@ -130,6 +143,8 @@ router.post(
           brollEnabled === true || brollEnabled === "true",
           brollStyle || "fullscreen",
           jobType || "magic-clips",
+          initialThumbnailUrl,
+          videoTitleVal,
         ],
       );
 
@@ -180,7 +195,7 @@ router.get("/", async (req, res) => {
     const { rows } = await query(
       `SELECT id, status, source_type, source_url, video_title,
               original_duration, clip_count, platforms, thumbnail_url, job_type,
-              created_at, updated_at
+              error_message, created_at, updated_at
        FROM jobs
        WHERE user_id = $1
        ORDER BY created_at DESC
