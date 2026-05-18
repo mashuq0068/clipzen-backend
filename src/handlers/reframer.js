@@ -1,31 +1,43 @@
 const { query } = require("../db/pool");
-const { transcribeVideo } = require("../services/transcriber");
 const { cutClip, formatTime } = require("../services/clipCutter");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
+
 const { promisify } = require("util");
 const { exec } = require("child_process");
 const fs = require("fs");
 
 const execAsync = promisify(exec);
 
-async function handleReframer(dbJob, videoPath, jobId, userId, helpers) {
+async function handleReframer(
+  dbJob,
+  videoPath,
+  jobId,
+  userId,
+  helpers,
+) {
   const { analyzeClipTimelineForClip } = helpers;
 
   const platforms = dbJob.platforms || ["tiktok"];
 
-  // Probe actual video duration
+  // ─────────────────────────────
+  // duration
+  // ─────────────────────────────
   let videoDuration = 60;
+
   try {
     const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
+
     const { stdout } = await execAsync(
       `"${ffprobe}" -v quiet -print_format json -show_format "${videoPath}"`,
       { timeout: 15000 },
     );
+
     const info = JSON.parse(stdout);
     const dur = parseFloat(info?.format?.duration || "0");
+
     if (dur > 0) videoDuration = dur;
   } catch (e) {
-    console.warn(`  ⚠️  Could not probe duration: ${e.message.split("\n")[0]}`);
+    console.warn(`⚠️ ffprobe failed: ${e.message}`);
   }
 
   const clip = {
@@ -35,15 +47,23 @@ async function handleReframer(dbJob, videoPath, jobId, userId, helpers) {
     transcript: "",
   };
 
-  console.log(`\nTranscribing...`);
-  const segments = await transcribeVideo(videoPath);
-  clip.transcript = segments.map((s) => s.text).join(" ");
-  const transcriptJson = JSON.stringify(segments);
+  // ─────────────────────────────
+  // timeline
+  // ─────────────────────────────
+  let clipTimeline = null;
 
-  console.log(`\nAnalyzing clip timeline (YOLOv8)...`);
-  const clipTimeline = await analyzeClipTimelineForClip(videoPath, clip);
+  try {
+    clipTimeline = await analyzeClipTimelineForClip(
+      videoPath,
+      clip,
+    );
+  } catch (e) {
+    console.warn(`⚠️ timeline failed: ${e.message}`);
+  }
 
-  console.log(`\nCutting reframed video...`);
+  // ─────────────────────────────
+  // cut
+  // ─────────────────────────────
   const cut = await cutClip(
     videoPath,
     clip.startSec,
@@ -54,30 +74,73 @@ async function handleReframer(dbJob, videoPath, jobId, userId, helpers) {
     clipTimeline,
   );
 
-  if (!cut || !cut.filePath) throw new Error("Reframe cut failed — no output file");
+  if (!cut?.filePath) {
+    throw new Error("Cut failed");
+  }
 
+  // ─────────────────────────────
+  // DB insert
+  // ─────────────────────────────
   const { rows: clipRows } = await query(
-    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms, transcript)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    `
+      INSERT INTO clips (
+        job_id,
+        user_id,
+        title,
+        file_path,
+        file_url,
+        thumbnail_url,
+        duration,
+        start_time,
+        end_time,
+        hook_score,
+        platforms,
+        transcript
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+      )
+      RETURNING id
+    `,
     [
       jobId,
       userId,
       clip.title,
       cut.filePath,
       cut.fileUrl,
+      null,
       formatTime(videoDuration),
       "0:00",
       formatTime(videoDuration),
       100,
       platforms,
-      transcriptJson,
+      null,
     ],
   );
 
   const clipId = clipRows[0].id;
+
+  // ─────────────────────────────
+  // thumbnail (MATCH MAGIC CLIPS STYLE)
+  // ─────────────────────────────
   if (cut.filePath && fs.existsSync(cut.filePath)) {
-    await extractClipThumbnail(cut.filePath, jobId, clipId);
+    const thumbUrl = await extractClipThumbnail(
+      cut.filePath,
+      jobId,
+      clipId,
+    );
+
+    if (thumbUrl) {
+      await query(
+        `UPDATE clips SET thumbnail_url = $1 WHERE id = $2`,
+        [thumbUrl, clipId],
+      );
+    }
   }
+
+  console.log(
+    `✅ Reframed video completed (clipId=${clipId})`,
+  );
 }
 
 module.exports = handleReframer;
