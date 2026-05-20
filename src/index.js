@@ -1,3 +1,4 @@
+/* eslint-disable no-undef, no-unused-vars */
 require("dotenv").config();
 const cors = require("cors");
 const helmet = require("helmet");
@@ -7,6 +8,9 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const cookieParser = require("cookie-parser");
+const authMiddleware = require("./middleware/auth");
+const crypto = require("crypto");
+const { handleWebhookEvent, queuePublish } = require("./services/socialAccounts");
 
 
 const app = express();
@@ -20,12 +24,13 @@ const corsOptions = {
     
     // List of allowed origins (your frontend URLs)
     const allowedOrigins = [
+      process.env.FRONTEND_URL,
       'http://localhost:8080',           // React dev server
       'http://localhost:8081',           // Alternative port
       'http://localhost:5173',           // Vite dev server
       'https://yourdomain.com',          // Production domain
       'https://api.yourdomain.com',      // API domain if separate
-    ];
+    ].filter(Boolean);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
@@ -64,6 +69,44 @@ app.use(helmet({
 }));
 
 app.use(morgan("dev"));
+
+app.post(
+  "/api/social/webhooks/zernio",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const signature =
+        req.get("X-Zernio-Signature") ||
+        req.get("X-Late-Signature");
+      const secret = process.env.ZERNIO_WEBHOOK_SECRET;
+
+      if (secret) {
+        if (!signature) {
+          return res.status(401).json({ error: "Missing Zernio webhook signature" });
+        }
+
+        const computed = crypto
+          .createHmac("sha256", secret)
+          .update(req.body)
+          .digest("hex");
+
+        const expected = Buffer.from(signature, "hex");
+        const actual = Buffer.from(computed, "hex");
+        if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+          return res.status(400).json({ error: "Invalid Zernio webhook signature" });
+        }
+      }
+
+      const payload = JSON.parse(req.body.toString("utf8"));
+      await handleWebhookEvent(payload);
+      res.json({ received: true });
+    } catch (err) {
+      console.error("Zernio webhook error:", err);
+      res.status(400).json({ error: "Invalid webhook payload" });
+    }
+  },
+);
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
@@ -74,6 +117,7 @@ const jobRoutes = require("./routes/jobs");
 const clipRoutes = require("./routes/clips");
 const userRoutes = require("./routes/user");
 const analyticsRoutes = require("./routes/analytics");
+const socialRoutes = require("./routes/social");
 
 // ── Ensure upload/output dirs exist ──────────────────────────
 [process.env.UPLOAD_DIR, process.env.OUTPUT_DIR].forEach((dir) => {
@@ -113,6 +157,24 @@ app.use("/api/jobs", jobRoutes);
 app.use("/api/clips", clipRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/social", socialRoutes);
+
+// Compatibility route for older frontend calls; the main contract is /api/social/publish.
+app.post("/api/publish", authMiddleware, async (req, res) => {
+  try {
+    const result = await queuePublish({
+      userId: req.user.id,
+      clipIds: req.body.clipIds || (req.body.clipId ? [req.body.clipId] : []),
+      accountIds: req.body.accountIds || [],
+      captionByClip: req.body.captionByClip || {},
+      scheduledFor: req.body.scheduledFor || null,
+    });
+    res.status(202).json(result);
+  } catch (err) {
+    console.error("Publish queue error:", err);
+    res.status(err.status || 500).json({ error: err.message || "Failed to queue publish job" });
+  }
+});
 
 // Health check
 app.get("/api/health", (req, res) => {

@@ -145,6 +145,91 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
 
+-- Connected social identities. Tokens are encrypted by the API before storage.
+CREATE TABLE IF NOT EXISTS connected_social_accounts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK (platform IN ('youtube','tiktok','instagram','facebook','linkedin','twitter')),
+  platform_account_id TEXT NOT NULL,
+  account_name TEXT,
+  account_username TEXT,
+  account_avatar_url TEXT,
+  access_token_encrypted TEXT NOT NULL,
+  refresh_token_encrypted TEXT,
+  token_type TEXT DEFAULT 'Bearer',
+  scope TEXT[] NOT NULL DEFAULT '{}',
+  access_token_expires_at TIMESTAMPTZ,
+  refresh_token_expires_at TIMESTAMPTZ,
+  publish_permissions TEXT[] NOT NULL DEFAULT '{}',
+  metadata JSONB NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'connected' CHECK (status IN ('connected','disconnected','expired','revoked','error')),
+  last_refreshed_at TIMESTAMPTZ,
+  connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  disconnected_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, platform, platform_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_user_id ON connected_social_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_platform ON connected_social_accounts(platform);
+CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_status ON connected_social_accounts(status);
+
+CREATE TABLE IF NOT EXISTS zernio_profiles (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  zernio_profile_id TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS social_publish_jobs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','processing','published','scheduled','partial','failed','cancelled')),
+  scheduled_for TIMESTAMPTZ,
+  selected_account_ids UUID[] NOT NULL DEFAULT '{}',
+  selected_clip_ids UUID[] NOT NULL DEFAULT '{}',
+  caption_overrides JSONB NOT NULL DEFAULT '{}',
+  bull_job_id TEXT,
+  zernio_response JSONB,
+  error_message TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_publish_jobs_user_id ON social_publish_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_social_publish_jobs_status ON social_publish_jobs(status);
+
+CREATE TABLE IF NOT EXISTS social_publish_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  publish_job_id UUID NOT NULL REFERENCES social_publish_jobs(id) ON DELETE CASCADE,
+  clip_id UUID NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','processing','published','scheduled','partial','failed','cancelled')),
+  caption TEXT,
+  zernio_post_id TEXT,
+  zernio_response JSONB,
+  error_message TEXT,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_publish_items_job_id ON social_publish_items(publish_job_id);
+CREATE INDEX IF NOT EXISTS idx_social_publish_items_clip_id ON social_publish_items(clip_id);
+CREATE INDEX IF NOT EXISTS idx_social_publish_items_zernio_post_id ON social_publish_items(zernio_post_id);
+
+CREATE TABLE IF NOT EXISTS zernio_webhook_events (
+  event_id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  processed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ── SAFE MIGRATIONS (idempotent ALTER TABLE) ──────────────────
 -- thumbnail_url for jobs: extracted at 10% of source video duration
 ALTER TABLE jobs  ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
@@ -156,6 +241,34 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_enabled BOOLEAN DEFAULT FALSE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_style TEXT NOT NULL DEFAULT 'fullscreen' CHECK (broll_style IN ('fullscreen', 'pip'));
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'magic-clips';
+
+ALTER TABLE connected_social_accounts ADD COLUMN IF NOT EXISTS zernio_account_id TEXT;
+ALTER TABLE connected_social_accounts ALTER COLUMN access_token_encrypted DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_zernio_account_id ON connected_social_accounts(zernio_account_id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_connected_social_accounts_updated_at') THEN
+    CREATE TRIGGER trg_connected_social_accounts_updated_at
+      BEFORE UPDATE ON connected_social_accounts
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_zernio_profiles_updated_at') THEN
+    CREATE TRIGGER trg_zernio_profiles_updated_at
+      BEFORE UPDATE ON zernio_profiles
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_social_publish_jobs_updated_at') THEN
+    CREATE TRIGGER trg_social_publish_jobs_updated_at
+      BEFORE UPDATE ON social_publish_jobs
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_social_publish_items_updated_at') THEN
+    CREATE TRIGGER trg_social_publish_items_updated_at
+      BEFORE UPDATE ON social_publish_items
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+END $$;
 `;
 
 async function migrate() {

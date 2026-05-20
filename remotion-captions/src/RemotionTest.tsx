@@ -11,8 +11,7 @@ import {
 } from "./CaptionedVideo"; // adjust path if needed
 // Sample words generator
 const SAMPLE_TEXT =
-  "এটি আপনার ক্যাপশন স্টাইল নির্বাচন-এর একটি প্রিভিউ। প্রতিটি শব্দ ক্রমানুসারে হাইলাইট হবে যাতে আপনি দেখতে পারেন এটি কেমন দেখায়।";
-  
+  "This is a preview of your caption style selection. Each word will be highlighted in sequence so you can see how it looks.";
 const WORD_DURATION = 0.5; // each word appears for 0.5 seconds
 const PREVIEW_FPS = 30;
 // ─────────────────────────────────────────────────────────────
