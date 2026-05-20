@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS clips (
   title            TEXT NOT NULL DEFAULT '',
   file_path        TEXT,                      -- local path to the .mp4 file
   file_url         TEXT,                      -- served URL (e.g. /outputs/...)
+  cloud_url        TEXT,                      -- Cloudinary hosted URL
   duration         TEXT,                      -- e.g. "0:32"
   start_time       TEXT,                      -- e.g. "2:14"
   end_time         TEXT,                      -- e.g. "2:46"
@@ -235,6 +236,7 @@ CREATE TABLE IF NOT EXISTS zernio_webhook_events (
 ALTER TABLE jobs  ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
 -- thumbnail_url for clips: extracted at 20% of rendered clip duration
 ALTER TABLE clips ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
+ALTER TABLE clips ADD COLUMN IF NOT EXISTS cloud_url TEXT;
 
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_enabled BOOLEAN DEFAULT FALSE;

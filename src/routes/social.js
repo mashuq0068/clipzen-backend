@@ -8,9 +8,21 @@ const {
   getConnections,
   listPublishJobs,
   queuePublish,
+  handleWebhookEvent,
 } = require("../services/socialAccounts");
 
 const router = express.Router();
+
+// BUG FIX 3: Add webhook endpoint for Zernio status updates
+router.post("/webhooks/zernio", express.json(), async (req, res) => {
+  try {
+    await handleWebhookEvent(req.body);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.sendStatus(500);
+  }
+});
 
 router.use(authMiddleware);
 
@@ -118,5 +130,7 @@ router.get("/publishes", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch publish history" });
   }
 });
+
+
 
 module.exports = router;

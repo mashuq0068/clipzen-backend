@@ -1,6 +1,7 @@
 const { query } = require("../db/pool");
 const { cutClip, formatTime } = require("../services/clipCutter");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
+const { uploadToCloudinary } = require("../services/cloudinary");
 
 const { promisify } = require("util");
 const { exec } = require("child_process");
@@ -81,6 +82,13 @@ async function handleReframer(
   // ─────────────────────────────
   // DB insert
   // ─────────────────────────────
+  let cloudUrl = null;
+  try {
+    cloudUrl = await uploadToCloudinary(cut.filePath);
+  } catch (err) {
+    console.error("  ⚠️ Cloudinary upload failed:", err);
+  }
+
   const { rows: clipRows } = await query(
     `
       INSERT INTO clips (
@@ -89,6 +97,7 @@ async function handleReframer(
         title,
         file_path,
         file_url,
+        cloud_url,
         thumbnail_url,
         duration,
         start_time,
@@ -98,7 +107,7 @@ async function handleReframer(
         transcript
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
       )
       RETURNING id
     `,
@@ -108,6 +117,7 @@ async function handleReframer(
       clip.title,
       cut.filePath,
       cut.fileUrl,
+      cloudUrl,
       null,
       formatTime(videoDuration),
       "0:00",

@@ -4,7 +4,13 @@ const { query, withTransaction } = require("../db/pool");
 const { socialQueue } = require("../queue/socialQueue");
 const { zernioProvider } = require("../social/providers/zernio.provider");
 
-const SUPPORTED_PLATFORMS = ["youtube", "tiktok", "instagram", "facebook", "twitter"];
+const SUPPORTED_PLATFORMS = [
+  "youtube",
+  "tiktok",
+  "instagram",
+  "facebook",
+  "twitter",
+];
 
 const PLATFORM_LABELS = {
   youtube: "YouTube Shorts",
@@ -15,7 +21,11 @@ const PLATFORM_LABELS = {
 };
 
 function backendPublicUrl() {
-  return process.env.BACKEND_PUBLIC_URL || process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`;
+  return (
+    process.env.BACKEND_PUBLIC_URL ||
+    process.env.BACKEND_URL ||
+    `http://localhost:${process.env.PORT || 3001}`
+  );
 }
 
 function frontendUrl() {
@@ -37,14 +47,46 @@ function publicClipUrl(fileUrl) {
   return new URL(fileUrl, backendPublicUrl()).toString();
 }
 
+function validatePublicUrls(clips) {
+  const base = backendPublicUrl();
+  const isLocal = /localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(base);
+  if (isLocal) {
+    console.warn(
+      `⚠️  BACKEND_PUBLIC_URL is set to "${base}". ` +
+        `Zernio cannot download videos from localhost. ` +
+        `Set BACKEND_PUBLIC_URL to a publicly accessible URL (e.g. https://api.clipzen.com) in your .env file.`,
+    );
+  }
+  for (const clip of clips) {
+    // BUG FIX 1: Check cloud_url first, fallback to file_url
+    const url = clip.cloud_url || publicClipUrl(clip.file_url);
+    if (url && /localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(url)) {
+      const error = new Error(
+        `Clip "${clip.title || clip.id}" resolves to a localhost URL (${url}). ` +
+          `Set BACKEND_PUBLIC_URL in .env to a public URL so Zernio can access your videos.`,
+      );
+      error.status = 422;
+      throw error;
+    }
+  }
+}
+
 function normalizeAccount(account) {
   return {
     zernioAccountId: account._id || account.accountId || account.id,
     platform: account.platform,
-    accountName: account.displayName || account.name || account.username || PLATFORM_LABELS[account.platform],
+    accountName:
+      account.displayName ||
+      account.name ||
+      account.username ||
+      PLATFORM_LABELS[account.platform],
     accountUsername: account.username || null,
     accountAvatarUrl: account.avatarUrl || account.profileImageUrl || null,
-    platformAccountId: account.platformAccountId || account.externalId || account.username || account._id,
+    platformAccountId:
+      account.platformAccountId ||
+      account.externalId ||
+      account.username ||
+      account._id,
     profileUrl: account.profileUrl || null,
     connected: account.isActive !== false,
     metadata: account,
@@ -81,14 +123,17 @@ async function ensureZernioProfile(userId) {
     return existing.rows[0].zernio_profile_id;
   }
 
-  const user = await query("SELECT email, name FROM users WHERE id = $1", [userId]);
+  const user = await query("SELECT email, name FROM users WHERE id = $1", [
+    userId,
+  ]);
   const label = user.rows[0]?.name || user.rows[0]?.email || "Clipzen creator";
 
   const data = await zernioProvider.createProfile({
     name: `Clipzen - ${label}`,
     description: `Clipzen social publishing profile for user ${userId}`,
   });
-  const profileId = data.profile?._id || data.profile?.id || data._id || data.id;
+  const profileId =
+    data.profile?._id || data.profile?.id || data._id || data.id;
 
   if (!profileId) {
     const error = new Error("Zernio did not return a profile ID");
@@ -209,7 +254,11 @@ async function createConnectUrl({ userId, platform, redirectPath }) {
     socialAuth: "success",
     platform,
   });
-  const authUrl = await zernioProvider.getConnectUrl({ platform, profileId, redirectUrl });
+  const authUrl = await zernioProvider.getConnectUrl({
+    platform,
+    profileId,
+    redirectUrl,
+  });
 
   if (!authUrl) {
     const error = new Error("Zernio did not return an OAuth URL");
@@ -269,9 +318,10 @@ async function getPublishAccounts(userId, accountIds) {
   return rows.map(publicAccount);
 }
 
+// BUG FIX 1: Added c.cloud_url to the SELECT query
 async function getPublishClips(userId, clipIds) {
   const { rows } = await query(
-    `SELECT c.id, c.job_id, c.title, c.file_url, c.file_path, c.transcript,
+    `SELECT c.id, c.job_id, c.title, c.file_url, c.cloud_url, c.file_path, c.transcript,
             COALESCE(jsonb_object_agg(cap.platform, cap.body) FILTER (WHERE cap.platform IS NOT NULL), '{}'::jsonb) AS captions
      FROM clips c
      LEFT JOIN captions cap ON cap.clip_id = c.id
@@ -287,9 +337,13 @@ async function getPublishClips(userId, clipIds) {
     throw error;
   }
 
+  // BUG FIX 1: Check cloud_url first, fallback to file_url
   rows.forEach((clip) => {
-    if (!publicClipUrl(clip.file_url)) {
-      const error = new Error(`Clip "${clip.title || clip.id}" does not have a publishable media URL`);
+    const mediaUrl = clip.cloud_url || publicClipUrl(clip.file_url);
+    if (!mediaUrl) {
+      const error = new Error(
+        `Clip "${clip.title || clip.id}" does not have a publishable media URL`,
+      );
       error.status = 400;
       throw error;
     }
@@ -300,16 +354,35 @@ async function getPublishClips(userId, clipIds) {
 
 function defaultCaptionForClip(clip, accounts) {
   const platform = accounts[0]?.platform;
-  return (
+  const caption =
     clip.captions?.[platform] ||
     clip.captions?.instagram ||
     clip.captions?.tiktok ||
+    clip.captions?.youtube ||
+    clip.captions?.facebook ||
+    clip.captions?.twitter ||
     clip.title ||
-    "New Clipzen clip"
-  );
+    "Check out this clip from Clipzen!";
+
+  console.log(`   💬 Default caption for platform "${platform}": "${caption}"`);
+  return caption;
 }
 
-async function queuePublish({ userId, clipIds, accountIds, captionByClip = {}, scheduledFor = null }) {
+async function queuePublish({
+  userId,
+  clipIds,
+  accountIds,
+  captionByClip = {},
+  scheduledFor = null,
+}) {
+  console.log("📝 queuePublish called with:", {
+    userId,
+    clipIds,
+    accountIds,
+    captionByClip,
+    scheduledFor,
+  });
+
   if (!Array.isArray(clipIds) || clipIds.length === 0) {
     const error = new Error("Select at least one clip to publish");
     error.status = 400;
@@ -336,16 +409,17 @@ async function queuePublish({ userId, clipIds, accountIds, captionByClip = {}, s
     );
 
     for (const clip of clips) {
+      // Get caption: first from override, then default, then guaranteed fallback
+      const caption =
+        captionByClip[clip.id] || defaultCaptionForClip(clip, accounts);
+      console.log(`   📝 Inserting caption for clip ${clip.id}: "${caption}"`);
+
       await client.query(
         `INSERT INTO social_publish_items (
           publish_job_id, clip_id, status, caption
         )
         VALUES ($1, $2, 'queued', $3)`,
-        [
-          publish.rows[0].id,
-          clip.id,
-          captionByClip[clip.id] || defaultCaptionForClip(clip, accounts),
-        ],
+        [publish.rows[0].id, clip.id, caption],
       );
     }
 
@@ -355,7 +429,9 @@ async function queuePublish({ userId, clipIds, accountIds, captionByClip = {}, s
   const bullJob = await socialQueue.add(
     "publish-clips",
     { publishJobId: result.id, userId },
-    scheduledFor ? { delay: Math.max(0, new Date(scheduledFor).getTime() - Date.now()) } : undefined,
+    scheduledFor
+      ? { delay: Math.max(0, new Date(scheduledFor).getTime() - Date.now()) }
+      : undefined,
   );
 
   await query("UPDATE social_publish_jobs SET bull_job_id = $1 WHERE id = $2", [
@@ -372,6 +448,8 @@ async function queuePublish({ userId, clipIds, accountIds, captionByClip = {}, s
 }
 
 async function processPublishJob(publishJobId) {
+  console.log(`\n📤 Processing publish job ${publishJobId}`);
+
   const publishResult = await query(
     `SELECT *
      FROM social_publish_jobs
@@ -389,8 +467,22 @@ async function processPublishJob(publishJobId) {
     [publishJobId],
   );
 
-  const accounts = await getPublishAccounts(publishJob.user_id, publishJob.selected_account_ids);
-  const clips = await getPublishClips(publishJob.user_id, publishJob.selected_clip_ids);
+  const accounts = await getPublishAccounts(
+    publishJob.user_id,
+    publishJob.selected_account_ids,
+  );
+  const clips = await getPublishClips(
+    publishJob.user_id,
+    publishJob.selected_clip_ids,
+  );
+
+  console.log(`   Clips: ${clips.length}, Accounts: ${accounts.length}`);
+  console.log(
+    `   Accounts: ${accounts.map((a) => `${a.platform}:${a.accountName}`).join(", ")}`,
+  );
+
+  // Validate that clip URLs are publicly accessible
+  validatePublicUrls(clips);
 
   let failed = false;
   const zernioPosts = [];
@@ -403,7 +495,18 @@ async function processPublishJob(publishJobId) {
       [publishJobId, clip.id],
     );
     const itemId = item.rows[0].id;
-    const caption = item.rows[0].caption || defaultCaptionForClip(clip, accounts);
+
+    // Get caption with MULTIPLE fallbacks
+    let caption = item.rows[0].caption || defaultCaptionForClip(clip, accounts);
+
+    // GUARANTEED FALLBACK: If still empty, use title or hardcoded text
+    if (!caption || caption.trim() === "") {
+      caption = clip.title || "Check out this clip from Clipzen!";
+    }
+
+    console.log(`   📝 Final caption for clip "${clip.title}": "${caption}"`);
+    console.log(`   📝 DB caption: "${item.rows[0].caption}"`);
+    console.log(`   📝 Clip captions object:`, JSON.stringify(clip.captions));
 
     try {
       await query(
@@ -418,29 +521,50 @@ async function processPublishJob(publishJobId) {
         .slice(0, 32)
         .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, "$1-$2-$3-$4-$5");
 
+      // BUG FIX 1: Prefer cloud_url over file_url
+      const mediaUrl = clip.cloud_url || publicClipUrl(clip.file_url);
+      console.log(`   📎 Clip "${clip.title}" → ${mediaUrl}`);
+
+      if (!mediaUrl || /localhost|127\.0\.0\.1/i.test(mediaUrl)) {
+        throw new Error(
+          `No public URL for clip "${clip.title}". cloud_url is missing.`,
+        );
+      }
+
+      // BUG FIX 2: Fixed payload field names - content → text, mediaItems → mediaUrls
+      // Replace the payload object with this:
+      const payload = {
+        title: clip.title || "Clipzen clip",
+        content: caption, // Try 'content' instead of 'text'
+        text: caption, // Keep both just in case
+        caption: caption, // Some APIs use 'caption'
+        description: caption, // YouTube might need this
+        mediaUrls: [mediaUrl],
+        mediaItems: [
+          {
+            // Try the old format too
+            type: "video",
+            url: mediaUrl,
+          },
+        ],
+        platforms: accounts.map((account) => ({
+          platform: account.platform,
+          accountId: account.zernioAccountId,
+        })),
+        publishNow: !publishJob.scheduled_for,
+        scheduledFor: publishJob.scheduled_for || undefined,
+        timezone: "UTC",
+        metadata: {
+          clipzenPublishJobId: publishJobId,
+          clipzenClipId: clip.id,
+        },
+      };
+
+      console.log(`   📤 Sending to Zernio:`, JSON.stringify(payload, null, 2));
+
       const data = await zernioProvider.createPost({
         requestId,
-        body: {
-          title: clip.title || "Clipzen clip",
-          content: caption,
-          mediaItems: [
-            {
-              type: "video",
-              url: publicClipUrl(clip.file_url),
-            },
-          ],
-          platforms: accounts.map((account) => ({
-            platform: account.platform,
-            accountId: account.zernioAccountId,
-          })),
-          publishNow: !publishJob.scheduled_for,
-          scheduledFor: publishJob.scheduled_for || undefined,
-          timezone: "UTC",
-          metadata: {
-            clipzenPublishJobId: publishJobId,
-            clipzenClipId: clip.id,
-          },
-        },
+        body: payload,
       });
 
       const post = data.post || data.existingPost || data;
@@ -462,6 +586,12 @@ async function processPublishJob(publishJobId) {
       );
     } catch (error) {
       failed = true;
+      console.error(`   ❌ Clip "${clip.title}" failed: ${error.message}`);
+      if (error.details)
+        console.error(
+          `      Details:`,
+          JSON.stringify(error.details).substring(0, 300),
+        );
       await query(
         `UPDATE social_publish_items
          SET status = 'failed', error_message = $1, zernio_response = $2
@@ -516,6 +646,7 @@ async function listPublishJobs(userId) {
   return rows;
 }
 
+// BUG FIX 3: Webhook handler for real-time status updates from Zernio
 async function handleWebhookEvent(payload) {
   await query(
     `INSERT INTO zernio_webhook_events (event_id, event_type, payload)

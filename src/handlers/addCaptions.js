@@ -2,6 +2,7 @@ const { query } = require("../db/pool");
 const { transcribeVideo, extractWordTimingsForClip } = require("../services/transcriber");
 const { burnCaptions } = require("../services/captionBurner");
 const { formatTime } = require("../services/clipCutter");
+const { uploadToCloudinary } = require("../services/cloudinary");
 const pathModule = require("path");
 const fs = require("fs");
 
@@ -72,15 +73,23 @@ async function handleAddCaptions(dbJob, videoPath, jobId, userId) {
   // ── Step 5: Save to DB ────────────────────────────────────────────────────
   const fileUrl = `/outputs/${jobId}/${pathModule.basename(captionedPath)}`;
 
+  let cloudUrl = null;
+  try {
+    cloudUrl = await uploadToCloudinary(captionedPath);
+  } catch (err) {
+    console.error("  ⚠️ Cloudinary upload failed:", err);
+  }
+
   await query(
-    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms, transcript)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, cloud_url, duration, start_time, end_time, hook_score, platforms, transcript)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [
       jobId,
       userId,
       clip.title,
       captionedPath,
       fileUrl,
+      cloudUrl,
       formatTime(clip.endSec),
       "0:00",
       formatTime(clip.endSec),

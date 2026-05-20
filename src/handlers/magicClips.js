@@ -9,6 +9,7 @@ const { generateAllCaptions } = require("../services/captionWriter");
 const { burnCaptions } = require("../services/captionBurner");
 const { buildBrollSegments } = require("../services/brollEngine");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
+const { uploadToCloudinary } = require("../services/cloudinary");
 const fs = require("fs");
 const pathModule = require("path");
 
@@ -238,15 +239,23 @@ async function handleMagicClips(dbJob, videoPath, jobId, userId, helpers) {
     const duration = formatTime(clip.endSec - clip.startSec);
     const thumbnailColor = THUMBNAIL_COLORS[i % THUMBNAIL_COLORS.length];
 
+    let cloudUrl = null;
+    try {
+      cloudUrl = await uploadToCloudinary(filePath);
+    } catch (err) {
+      console.error(`  ⚠️ Cloudinary upload failed for clip ${i + 1}:`, err);
+    }
+
     const { rows: clipRows } = await query(
-      `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms, thumbnail_color, transcript)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+      `INSERT INTO clips (job_id, user_id, title, file_path, file_url, cloud_url, duration, start_time, end_time, hook_score, platforms, thumbnail_color, transcript)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [
         jobId,
         userId,
         clip.title,
         filePath,
         fileUrl,
+        cloudUrl,
         duration,
         formatTime(clip.startSec),
         formatTime(clip.endSec),

@@ -7,6 +7,7 @@ const { cutClip, formatTime } = require("../services/clipCutter");
 const { burnCaptions } = require("../services/captionBurner");
 const { buildBrollSegments } = require("../services/brollEngine");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
+const { uploadToCloudinary } = require("../services/cloudinary");
 const { promisify } = require("util");
 const { exec } = require("child_process");
 const pathModule = require("path");

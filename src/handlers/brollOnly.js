@@ -3,6 +3,7 @@ const { transcribeVideo, extractWordTimingsForClip } = require("../services/tran
 const { formatTime } = require("../services/clipCutter");
 const { buildBrollSegments } = require("../services/brollEngine");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
+const { uploadToCloudinary } = require("../services/cloudinary");
 const pathModule = require("path");
 const fs = require("fs");
 const { promisify } = require("util");
@@ -88,15 +89,23 @@ async function handleBrollOnly(dbJob, videoPath, jobId, userId, helpers) {
     fileUrl = `/outputs/${jobId}/${pathModule.basename(finalPath)}`;
   }
 
+  let cloudUrl = null;
+  try {
+    cloudUrl = await uploadToCloudinary(finalPath);
+  } catch (err) {
+    console.error("  ⚠️ Cloudinary upload failed:", err);
+  }
+
   const { rows: clipRows } = await query(
-    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, duration, start_time, end_time, hook_score, platforms, transcript)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    `INSERT INTO clips (job_id, user_id, title, file_path, file_url, cloud_url, duration, start_time, end_time, hook_score, platforms, transcript)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
     [
       jobId,
       userId,
       clip.title,
       finalPath,
       fileUrl,
+      cloudUrl,
       formatTime(videoDuration),
       "0:00",
       formatTime(videoDuration),
