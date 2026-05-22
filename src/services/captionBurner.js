@@ -57,7 +57,7 @@ const CAPTION_STYLES = {
     strokeWidth: 8,
     bgBoxColor: "transparent",
     animation: "scale",
-    fontSize: 12,
+    fontSize: 62,
     fontFamily: "Montserrat",
     fontWeight: 900,
     uppercase: true,
@@ -359,8 +359,7 @@ const CAPTION_STYLES = {
     letterSpacing: "4px",
     activeStrategy: "shimmer",
     gradient:
-      "linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",
-  },
+"linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",  },
   retro_wave: {
     name: "retro_wave",
     layout: "bottom-center",

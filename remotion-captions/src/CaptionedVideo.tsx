@@ -150,14 +150,22 @@ export function getStrokeValue(s: StyleConfig): string | undefined {
   return undefined;
 }
 
-export function getLayoutPosition(layout: string, style?: StyleConfig): React.CSSProperties {
+export function getLayoutPosition(
+  layout: string,
+  style?: StyleConfig,
+): React.CSSProperties {
   let baseLayout: React.CSSProperties = {};
   switch (layout) {
     case "top-left":
       baseLayout = { top: 60, left: 20, right: 20 };
       break;
     case "center":
-      baseLayout = { top: "50%", left: 20, right: 20, transform: "translateY(-50%)" };
+      baseLayout = {
+        top: "50%",
+        left: 20,
+        right: 20,
+        transform: "translateY(-50%)",
+      };
       break;
     case "bottom-right":
       baseLayout = { bottom: 80, right: 20, left: "auto", maxWidth: "75%" };
@@ -176,7 +184,7 @@ export function getLayoutPosition(layout: string, style?: StyleConfig): React.CS
       const merged = { ...baseLayout };
       const tx = style.offsetX || 0;
       const ty = style.offsetY || 0;
-      
+
       if (tx !== 0 || ty !== 0) {
         const baseTransform = merged.transform ? `${merged.transform} ` : "";
         merged.transform = `${baseTransform}translate(${tx}px, ${ty}px)`;
@@ -437,6 +445,25 @@ export function computeActiveStrategy(params: {
         textShadow: "0 2px 10px rgba(0,0,0,0.5)",
       };
     }
+  case "rim_light": {
+  const breathe = Math.sin(frameInGroup * 0.12) * 0.5 + 0.5;
+  const innerGlow = Math.round(10 + breathe * 8);
+  const outerGlow = Math.round(28 + breathe * 20);
+  const farGlow = Math.round(55 + breathe * 30);
+  const activeColor = s.activeColor || "#FFE88A";
+
+  if (!isActive) {
+    return {
+      color: "#FFFFFF",
+      textShadow: undefined,   // ← plain white, no glow
+    };
+  }
+
+  return {
+    color: "#FFFFFF",
+    textShadow: `0 0 ${innerGlow}px ${activeColor}, 0 0 ${outerGlow}px ${activeColor}BB, 0 0 ${farGlow}px ${activeColor}44`,
+  };
+}
 
     // ── default ────────────────────────────────────────────────
     default: {
@@ -516,7 +543,6 @@ export const AnimatedWord: React.FC<{
   let transformOrigin = "center center";
 
   switch (s.animation) {
-
     // ── bounce ───────────────────────────────────────────────
     case "bounce": {
       const entryProgress = interpolate(
@@ -759,7 +785,7 @@ export const AnimatedWord: React.FC<{
     // Character visibility is handled entirely by the per-char
     // opacity/scale inside the JSX below — no outer snap needed.
     case "typewriter": {
-      opacity = 1;   // ← was: visibleChars > 0 ? 1 : 0  (caused hard snap)
+      opacity = 1; // ← was: visibleChars > 0 ? 1 : 0  (caused hard snap)
       transform = "none";
       filter = "none";
       break;
@@ -951,51 +977,49 @@ export const AnimatedWord: React.FC<{
          * Each char manages its own opacity/scale; the outer span
          * is always fully opaque so there is no hard 0→1 snap.
          */}
-        {s.animation === "typewriter" ? (
-          word.split("").map((char, i) => {
-            if (i >= (typewriterVisibleChars ?? 0)) return null;
+        {s.animation === "typewriter"
+          ? word.split("").map((char, i) => {
+              if (i >= (typewriterVisibleChars ?? 0)) return null;
 
-            const isLatest = i === (typewriterVisibleChars ?? 0) - 1;
+              const isLatest = i === (typewriterVisibleChars ?? 0) - 1;
 
-            const charOpacity = isLatest
-              ? interpolate(
-                  frameInGroup,
-                  [entryStart + i * 2, entryStart + i * 2 + 2],
-                  [0, 1],
-                  { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-                )
-              : 1;
+              const charOpacity = isLatest
+                ? interpolate(
+                    frameInGroup,
+                    [entryStart + i * 2, entryStart + i * 2 + 2],
+                    [0, 1],
+                    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+                  )
+                : 1;
 
-            const charScale = isLatest
-              ? interpolate(
-                  frameInGroup,
-                  [entryStart + i * 2, entryStart + i * 2 + 2],
-                  [0.8, 1],
-                  {
-                    easing: Easing.out(Easing.back(1.5)),
-                    extrapolateLeft: "clamp",
-                    extrapolateRight: "clamp",
-                  },
-                )
-              : 1;
+              const charScale = isLatest
+                ? interpolate(
+                    frameInGroup,
+                    [entryStart + i * 2, entryStart + i * 2 + 2],
+                    [0.8, 1],
+                    {
+                      easing: Easing.out(Easing.back(1.5)),
+                      extrapolateLeft: "clamp",
+                      extrapolateRight: "clamp",
+                    },
+                  )
+                : 1;
 
-            return (
-              <span
-                key={i}
-                style={{
-                  display: "inline-block",
-                  opacity: charOpacity,
-                  transform: `scale(${charScale})`,
-                  whiteSpace: "pre",
-                }}
-              >
-                {char}
-              </span>
-            );
-          })
-        ) : (
-          word
-        )}
+              return (
+                <span
+                  key={i}
+                  style={{
+                    display: "inline-block",
+                    opacity: charOpacity,
+                    transform: `scale(${charScale})`,
+                    whiteSpace: "pre",
+                  }}
+                >
+                  {char}
+                </span>
+              );
+            })
+          : word}
       </span>
 
       {/* ── Underline ──────────────────────────────────────── */}
@@ -1134,7 +1158,10 @@ export const CaptionedVideo: React.FC<Props> = ({
     splitTimeline.some((seg) => t >= seg.startSec && t < seg.endSec);
 
   const effectiveLayout = isInSplitMoment ? "center" : style.layout;
-  const layoutStyle = getLayoutPosition(effectiveLayout, isInSplitMoment ? undefined : style);
+  const layoutStyle = getLayoutPosition(
+    effectiveLayout,
+    isInSplitMoment ? undefined : style,
+  );
   const flexAlign = getFlexAlign(effectiveLayout);
   const alignItems = getAlignItems(effectiveLayout);
 

@@ -6,6 +6,7 @@ const util = require("util");
 
 const execFileAsync = util.promisify(execFile);
 const execAsync = util.promisify(exec);
+const PYTHON = process.env.PYTHON_PATH || "python3";
 
 function getFFmpeg() {
   return process.env.FFMPEG_PATH || "ffmpeg";
@@ -39,7 +40,7 @@ async function run(videoPath) {
     console.log("🧠 Detecting language...");
 
     // Language detection run (fast + small model)
-    const cmd = `py -3.11 -m whisper "${audioPath}" --model small --task transcribe --output_format json --output_dir "${outputDir}" --verbose False`;
+    const cmd = `${PYTHON} -m whisper "${audioPath}" --model small --task transcribe --output_format json --output_dir "${outputDir}" --verbose False`;
 
     await execAsync(cmd, {
       timeout: 10 * 60 * 1000,

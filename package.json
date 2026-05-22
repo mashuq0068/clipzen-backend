@@ -8,8 +8,10 @@
     "dev": "nodemon src/index.js",
     "migrate": "node src/db/migrate.js",
     "worker": "node src/workers/videoWorker.js",
+    "worker:render": "node src/workers/videoWorker.js",
     "worker:publishing": "node src/workers/publishingWorker.js"
   },
+
   "dependencies": {
     "@remotion/bundler": "^4.0.438",
     "@remotion/cli": "^4.0.438",
@@ -37,6 +39,7 @@
     "remotion": "^4.0.438",
     "uuid": "^9.0.1"
   },
+  
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.8.0",

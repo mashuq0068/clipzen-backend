@@ -8,6 +8,7 @@ const util = require("util");
 
 const execFileAsync = util.promisify(execFile);
 const execAsync = util.promisify(exec);
+const PYTHON = process.env.PYTHON_PATH || "python3";
 
 function getFFmpegPath() {
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
@@ -41,7 +42,7 @@ async function transcribeVideo(videoPath) {
     // for caption sync. Without this we only get segment-level timing.
     console.log("🎙️  Transcribing with Whisper (word timestamps)...");
 
-    const whisperCmd = `py -3.11 -m whisper "${audioPath}" --model small --output_format json --output_dir "${outputDir}" --word_timestamps True --verbose False`;
+    const whisperCmd = `${PYTHON} -m whisper "${audioPath}" --model small --output_format json --output_dir "${outputDir}" --word_timestamps True --verbose False`;
 
     await execAsync(whisperCmd, {
       timeout: 30 * 60 * 1000,

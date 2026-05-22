@@ -46,3 +46,7 @@
   font-family: "Russo One";
   src: url("../public/fonts/russoOne.ttf") format("truetype");  
 }
+@font-face {
+  font-family: "Chewy";
+  src: url("../public/fonts/chewy.ttf") format("truetype");  
+}

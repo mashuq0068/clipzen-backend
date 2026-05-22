@@ -1,0 +1,96 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: ./docker/api.Dockerfile
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+      - db
+      - ollama
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+
+  worker-video:
+    build:
+      context: .
+      dockerfile: ./docker/worker.Dockerfile
+    command: ["npm", "run", "worker"]
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+      - db
+      - ollama
+    restart: on-failure
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    environment:
+      - WORKER_ROLE=video
+
+  worker-render:
+    build:
+      context: .
+      dockerfile: ./docker/worker.Dockerfile
+    command: ["npm", "run", "worker:render"]
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+      - db
+      - ollama
+    restart: on-failure
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    environment:
+      - WORKER_ROLE=render
+      - START_PUBLISHING_WORKER=false
+
+  worker-publishing:
+    build:
+      context: .
+      dockerfile: ./docker/worker.Dockerfile
+    command: ["npm", "run", "worker:publishing"]
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+      - db
+    restart: on-failure
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '858568Fh#'
+      POSTGRES_DB: clipora_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  db-data:
+  ollama-data:
