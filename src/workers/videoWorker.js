@@ -41,13 +41,7 @@ const handleBrollOnly = require("../handlers/brollOnly");
 // and cached — clips skip the 15-30s cold start entirely.
 const { warmBundle } = require("../services/remotionBundle");
 warmBundle(); // fire-and-forget, errors are non-fatal
-
-const workerRole = process.env.WORKER_ROLE || "video";
-console.log(`Worker role: ${workerRole}`);
-const startPublishingWorker = process.env.START_PUBLISHING_WORKER !== "false" && workerRole !== "render";
-if (startPublishingWorker) {
-  require("./publishingWorker");
-}
+require("./publishingWorker");
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST || "localhost",
