@@ -46,37 +46,45 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
     console.warn(`  ⚠️  Could not probe duration: ${e.message.split("\n")[0]}`);
   }
 
-  console.log(`\nTranscribing...`);
-  const segments = await transcribeVideo(videoPath);
-  const transcriptJson = JSON.stringify(segments);
-
-  const clip = {
+  const analysisClip = {
     title: dbJob.video_title || "Edited Video",
     startSec: 0,
     endSec: videoDuration,
+  };
+
+  console.log(`\nTranscribing...`);
+  console.log(`\nAnalyzing layout...`);
+  const [segments, clipTimeline] = await Promise.all([
+    transcribeVideo(videoPath),
+    analyzeClipTimelineForClip(videoPath, analysisClip),
+  ]);
+  const transcriptJson = JSON.stringify(segments);
+
+  const clip = {
+    ...analysisClip,
     transcript: transcriptJson,
   };
 
-  // ── Face analysis ──────────────────────────────────────────────────────────
-  console.log(`\nAnalyzing layout...`);
-  let clipTimeline = {
+  let finalClipTimeline = clipTimeline || {
     timeline: [],
     srcW: 1920,
     srcH: 1080,
     isAlreadyVertical: false,
   };
+
+  const modeSummary = finalClipTimeline.timeline.reduce((acc, e) => {
+    acc[e.decision.mode] = (acc[e.decision.mode] || 0) + 1;
+    return acc;
+  }, {});
+  console.log(`  Face timeline: ${JSON.stringify(modeSummary)}`);
+
+  // ── Face analysis ──────────────────────────────────────────────────────────
   try {
-    clipTimeline = await analyzeClipTimelineForClip(videoPath, clip);
-    const modeSummary = clipTimeline.timeline.reduce((acc, e) => {
-      acc[e.decision.mode] = (acc[e.decision.mode] || 0) + 1;
-      return acc;
-    }, {});
-    console.log(`  Face timeline: ${JSON.stringify(modeSummary)}`);
 
     // ── Layout stabilization ───────────────────────────────────────────────
-    if (!clipTimeline.isAlreadyVertical && clipTimeline.timeline.length >= 4) {
+    if (!finalClipTimeline.isAlreadyVertical && finalClipTimeline.timeline.length >= 4) {
       const originalClipStart = clip.startSec;
-      const trimmed = trimToStableLayoutWindow(clip, clipTimeline.timeline);
+      const trimmed = trimToStableLayoutWindow(clip, finalClipTimeline.timeline);
       if (trimmed.wasTrimmed) {
         console.log(
           `  ✂️  Layout-stabilized: [${formatTime(clip.startSec)}-${formatTime(clip.endSec)}] → ` +
@@ -84,14 +92,14 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
             `dominant="${trimmed.dominantMode}" (${(trimmed.dominantFrac * 100).toFixed(0)}%)`,
         );
         const trimmedTimeline = trimToTimelineWindow(
-          clipTimeline.timeline,
+          finalClipTimeline.timeline,
           trimmed.startSec,
           trimmed.endSec,
           originalClipStart,
         );
         clip.startSec = trimmed.startSec;
         clip.endSec = trimmed.endSec;
-        clipTimeline = { ...clipTimeline, timeline: trimmedTimeline };
+        finalClipTimeline = { ...finalClipTimeline, timeline: trimmedTimeline };
       }
     }
   } catch (e) {
@@ -107,7 +115,7 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
     jobId,
     "general",
     clip,
-    clipTimeline,
+    finalClipTimeline,
   );
   let filePath = cut.filePath;
   let fileUrl = cut.fileUrl;
@@ -132,13 +140,13 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
     );
 
     const isSplitClip =
-      clipTimeline.timeline.length > 0 &&
-      clipTimeline.timeline.filter((e) => e.decision.mode === "split").length >
-        clipTimeline.timeline.length * 0.4;
+      finalClipTimeline.timeline.length > 0 &&
+      finalClipTimeline.timeline.filter((e) => e.decision.mode === "split").length >
+        finalClipTimeline.timeline.length * 0.4;
 
     const splitTimeline = [];
-    if (clipTimeline.timeline.length > 0) {
-      const tl = clipTimeline.timeline;
+    if (finalClipTimeline.timeline.length > 0) {
+      const tl = finalClipTimeline.timeline;
       for (let ti = 0; ti < tl.length; ti++) {
         if (tl[ti].decision.mode !== "split") continue;
         const segStart = tl[ti].clipTimeSec;

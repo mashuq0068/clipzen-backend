@@ -771,7 +771,9 @@ async function burnCaptions(clip, contentType, platforms) {
       clipDurationSecs = physicalDuration;
     }
 
-    const fps = 30;
+    const fps = Number.isFinite(Number.parseInt(process.env.RENDER_FPS || "24", 10))
+      ? Number.parseInt(process.env.RENDER_FPS || "24", 10)
+      : 24;
     const durationInFrames = Math.ceil(clipDurationSecs * fps);
 
     console.log(
@@ -992,6 +994,10 @@ async function burnCaptions(clip, contentType, platforms) {
     });
 
     let lastProgress = -1;
+    const renderCrf = Number.isFinite(Number.parseInt(process.env.RENDER_CRF || "20", 10))
+      ? Number.parseInt(process.env.RENDER_CRF || "20", 10)
+      : 20;
+
     await renderMedia({
       composition,
       serveUrl,
@@ -1000,7 +1006,7 @@ async function burnCaptions(clip, contentType, platforms) {
       inputProps: props,
       width: 1080,
       height: 1920,
-      crf: 18,
+      crf: renderCrf,
       pixelFormat: "yuv420p",
       chromiumOptions: {
         gl: "angle",

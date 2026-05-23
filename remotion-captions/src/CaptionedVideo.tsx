@@ -530,7 +530,7 @@ export const AnimatedWord: React.FC<{
   let fontSize: number;
   if (s.animation === "scale") {
     fontSize = isActive
-      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.0])
+      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.1])
       : baseSize * 0.84;
   } else {
     fontSize = baseSize;

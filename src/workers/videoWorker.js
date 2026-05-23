@@ -49,6 +49,13 @@ const connection = new IORedis({
   maxRetriesPerRequest: null,
 });
 
+const workerConcurrency = Math.max(
+  1,
+  Number.isFinite(Number.parseInt(process.env.WORKER_CONCURRENCY || "2", 10))
+    ? Number.parseInt(process.env.WORKER_CONCURRENCY || "2", 10)
+    : 2,
+);
+
 const worker = new Worker(
   "video-processing",
   async (job) => {
@@ -214,7 +221,7 @@ const worker = new Worker(
       }
     }
   },
-  { connection, concurrency: 1 },
+  { connection, concurrency: workerConcurrency },
 );
 
 async function updateJobStatus(jobId, status) {

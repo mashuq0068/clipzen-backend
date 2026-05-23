@@ -518,9 +518,13 @@ async function cutClip(
     const fade     = `fade=t=in:st=0:d=0.3,fade=t=out:st=${Math.max(0, totalDuration - 0.5).toFixed(2)}:d=0.4`;
 
     const useGpu    = process.env.USE_GPU_ENCODING === "true";
+    const preset = process.env.FFMPEG_PRESET || "fast";
+    const crf = Number.isFinite(Number.parseInt(process.env.FFMPEG_CRF || "20", 10))
+      ? Number.parseInt(process.env.FFMPEG_CRF || "20", 10)
+      : 20;
     const videoArgs = useGpu
-      ? ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "20", "-profile:v", "main", "-level", "4.0"]
-      : ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "main", "-level", "4.0"];
+      ? ["-c:v", "h264_nvenc", "-preset", preset, "-cq", String(crf), "-profile:v", "main", "-level", "4.0"]
+      : ["-c:v", "libx264", "-preset", preset, "-crf", String(crf), "-profile:v", "main", "-level", "4.0"];
 
     let filterSpec;
 

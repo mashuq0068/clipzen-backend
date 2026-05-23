@@ -9,6 +9,13 @@ const util = require("util");
 const execFileAsync = util.promisify(execFile);
 const execAsync = util.promisify(exec);
 const PYTHON = process.env.PYTHON_PATH || "python3";
+const WHISPER_MODEL = process.env.WHISPER_MODEL || "base";
+const WHISPER_THREADS = Math.max(
+  1,
+  Number.isFinite(Number.parseInt(process.env.WHISPER_THREADS || "4", 10))
+    ? Number.parseInt(process.env.WHISPER_THREADS || "4", 10)
+    : 4,
+);
 
 function getFFmpegPath() {
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
@@ -40,9 +47,9 @@ async function transcribeVideo(videoPath) {
     // ── Step 2: Run Whisper with word timestamps ──────────────
     // --word_timestamps True gives us per-word timing — critical
     // for caption sync. Without this we only get segment-level timing.
-    console.log("🎙️  Transcribing with Whisper (word timestamps)...");
+    console.log(`🎙️  Transcribing with Whisper (model=${WHISPER_MODEL}, threads=${WHISPER_THREADS})...`);
 
-    const whisperCmd = `${PYTHON} -m whisper "${audioPath}" --model small --output_format json --output_dir "${outputDir}" --word_timestamps True --verbose False`;
+    const whisperCmd = `${PYTHON} -m whisper "${audioPath}" --model ${WHISPER_MODEL} --output_format json --output_dir "${outputDir}" --word_timestamps True --threads ${WHISPER_THREADS} --verbose False`;
 
     await execAsync(whisperCmd, {
       timeout: 30 * 60 * 1000,
