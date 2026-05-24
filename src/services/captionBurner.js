@@ -359,7 +359,8 @@ const CAPTION_STYLES = {
     letterSpacing: "4px",
     activeStrategy: "shimmer",
     gradient:
-"linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",  },
+      "linear-gradient(90deg, #FFF8DC 0%, #FFD54A 30%, #F4B400 50%, #FFD54A 70%, #FFF8DC 100%)",
+  },
   retro_wave: {
     name: "retro_wave",
     layout: "bottom-center",
@@ -752,10 +753,7 @@ async function burnCaptions(clip, contentType, platforms) {
 
     let clipDurationSecs;
     if (physicalDuration && physicalDuration > 5) {
-      clipDurationSecs =
-        computedDuration > physicalDuration + 10
-          ? physicalDuration
-          : Math.min(computedDuration, physicalDuration);
+      clipDurationSecs = physicalDuration;
     } else {
       if (clip.wordTimings && clip.wordTimings.length > 0) {
         const lastWord = clip.wordTimings[clip.wordTimings.length - 1];
@@ -771,9 +769,7 @@ async function burnCaptions(clip, contentType, platforms) {
       clipDurationSecs = physicalDuration;
     }
 
-    const fps = Number.isFinite(Number.parseInt(process.env.RENDER_FPS || "24", 10))
-      ? Number.parseInt(process.env.RENDER_FPS || "24", 10)
-      : 24;
+   const fps = 30;
     const durationInFrames = Math.ceil(clipDurationSecs * fps);
 
     console.log(
@@ -855,15 +851,22 @@ async function burnCaptions(clip, contentType, platforms) {
         const resolvedJob = path.resolve(jobDir);
 
         if (!resolvedSeg.startsWith(resolvedJob)) {
-          const destPath = path.join(localBrollDir, path.basename(seg.videoUrl));
+          const destPath = path.join(
+            localBrollDir,
+            path.basename(seg.videoUrl),
+          );
           try {
             if (fs.existsSync(resolvedSeg) && !fs.existsSync(destPath)) {
               fs.copyFileSync(resolvedSeg, destPath);
-              console.log(`      📋 Copied cross-job b-roll: ${path.basename(seg.videoUrl)}`);
+              console.log(
+                `      📋 Copied cross-job b-roll: ${path.basename(seg.videoUrl)}`,
+              );
             }
             localVideoUrl = fs.existsSync(destPath) ? destPath : null;
           } catch (copyErr) {
-            console.warn(`      ⚠️  Could not copy b-roll, skipping: ${copyErr.message}`);
+            console.warn(
+              `      ⚠️  Could not copy b-roll, skipping: ${copyErr.message}`,
+            );
             localVideoUrl = null;
           }
         }
@@ -994,7 +997,9 @@ async function burnCaptions(clip, contentType, platforms) {
     });
 
     let lastProgress = -1;
-    const renderCrf = Number.isFinite(Number.parseInt(process.env.RENDER_CRF || "20", 10))
+    const renderCrf = Number.isFinite(
+      Number.parseInt(process.env.RENDER_CRF || "20", 10),
+    )
       ? Number.parseInt(process.env.RENDER_CRF || "20", 10)
       : 20;
 
@@ -1094,8 +1099,7 @@ async function burnCaptions(clip, contentType, platforms) {
       err.code,
       err.killed,
     );
-    if (err.stderr)
-      console.error("   stderr:", err.stderr.substring(0, 1000));
+    if (err.stderr) console.error("   stderr:", err.stderr.substring(0, 1000));
     return clip.filePath;
   } finally {
     // Stop b-roll server

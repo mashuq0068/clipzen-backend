@@ -445,25 +445,25 @@ export function computeActiveStrategy(params: {
         textShadow: "0 2px 10px rgba(0,0,0,0.5)",
       };
     }
-  case "rim_light": {
-  const breathe = Math.sin(frameInGroup * 0.12) * 0.5 + 0.5;
-  const innerGlow = Math.round(10 + breathe * 8);
-  const outerGlow = Math.round(28 + breathe * 20);
-  const farGlow = Math.round(55 + breathe * 30);
-  const activeColor = s.activeColor || "#FFE88A";
+    case "rim_light": {
+      const breathe = Math.sin(frameInGroup * 0.12) * 0.5 + 0.5;
+      const innerGlow = Math.round(10 + breathe * 8);
+      const outerGlow = Math.round(28 + breathe * 20);
+      const farGlow = Math.round(55 + breathe * 30);
+      const activeColor = s.activeColor || "#FFE88A";
 
-  if (!isActive) {
-    return {
-      color: "#FFFFFF",
-      textShadow: undefined,   // ← plain white, no glow
-    };
-  }
+      if (!isActive) {
+        return {
+          color: "#FFFFFF",
+          textShadow: undefined, // ← plain white, no glow
+        };
+      }
 
-  return {
-    color: "#FFFFFF",
-    textShadow: `0 0 ${innerGlow}px ${activeColor}, 0 0 ${outerGlow}px ${activeColor}BB, 0 0 ${farGlow}px ${activeColor}44`,
-  };
-}
+      return {
+        color: "#FFFFFF",
+        textShadow: `0 0 ${innerGlow}px ${activeColor}, 0 0 ${outerGlow}px ${activeColor}BB, 0 0 ${farGlow}px ${activeColor}44`,
+      };
+    }
 
     // ── default ────────────────────────────────────────────────
     default: {
@@ -530,7 +530,7 @@ export const AnimatedWord: React.FC<{
   let fontSize: number;
   if (s.animation === "scale") {
     fontSize = isActive
-      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.1])
+      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.03])
       : baseSize * 0.84;
   } else {
     fontSize = baseSize;
@@ -1125,7 +1125,14 @@ export const CaptionedVideo: React.FC<Props> = ({
   const activeIdx = words.findIndex((w) => t >= w.startSec && t < w.endSec);
   const allDone = words.length > 0 && t > words[words.length - 1].endSec + 0.4;
 
-  if (allDone || activeIdx < 0) {
+  let lastStartedIdx = -1;
+  for (let i = 0; i < words.length; i++) {
+    if (t >= words[i].startSec) lastStartedIdx = i;
+    else break;
+  }
+  const effectiveActiveIdx = activeIdx >= 0 ? activeIdx : lastStartedIdx;
+
+  if (allDone || effectiveActiveIdx < 0) {
     return (
       <AbsoluteFill style={{ overflow: "hidden" }}>
         <OffthreadVideo
@@ -1141,7 +1148,7 @@ export const CaptionedVideo: React.FC<Props> = ({
 
   const wordsPerGroup = style.wordsPerLine || 2;
   const totalGroups = Math.ceil(words.length / wordsPerGroup);
-  const currentGroupIndex = Math.floor(activeIdx / wordsPerGroup);
+  const currentGroupIndex = Math.floor(effectiveActiveIdx / wordsPerGroup);
   const groupStart = currentGroupIndex * wordsPerGroup;
   const groupWords = words.slice(groupStart, groupStart + wordsPerGroup);
 
@@ -1151,7 +1158,7 @@ export const CaptionedVideo: React.FC<Props> = ({
     frame - Math.floor(groupFirstWord.startSec * fps),
   );
 
-  const activeWordIndex = activeIdx - groupStart;
+  const activeWordIndex = activeIdx >= 0 ? activeIdx - groupStart : -1;
 
   const isInSplitMoment =
     splitTimeline.length > 0 &&
