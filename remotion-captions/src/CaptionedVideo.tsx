@@ -141,6 +141,10 @@ interface Props {
   brollSegments?: BrollSegment[];
   splitTimeline?: Array<{ startSec: number; endSec: number }>;
   emphasisEvents?: WordEmphasisEvent[];
+  titleEnabled?: boolean;
+  titleText?: string;
+  titleStyle?: any;
+  titlePosition?: string;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1116,6 +1120,10 @@ export const CaptionedVideo: React.FC<Props> = ({
   brollSegments = [],
   splitTimeline = [],
   emphasisEvents = [],
+  titleEnabled,
+  titleText,
+  titleStyle,
+  titlePosition,
 }) => {
   const frame = useCurrentFrame();
   const t = frame / fps;
@@ -1201,6 +1209,49 @@ export const CaptionedVideo: React.FC<Props> = ({
       {brollSegments.map((seg, i) => (
         <BrollOverlay key={i} segment={seg} fps={fps} />
       ))}
+
+      {/* Title Overlay */}
+      {titleEnabled && titleText && titleStyle && (
+        <div
+          style={{
+            position: "absolute",
+            zIndex: 15,
+            width: "100%",
+            display: "flex",
+            justifyContent: "center",
+            top: titlePosition === "top" ? 150 : titlePosition === "center" ? "50%" : "auto",
+            bottom: titlePosition === "bottom" ? 150 : "auto",
+            transform: titlePosition === "center" ? "translateY(-50%)" : "none",
+          }}
+        >
+          <div
+            style={{
+              fontFamily: `'${titleStyle.fontFamily}', sans-serif`,
+              fontWeight: titleStyle.fontWeight,
+              fontStyle: titleStyle.fontStyle || "normal",
+              textTransform: titleStyle.uppercase ? "uppercase" : "none",
+              letterSpacing: titleStyle.letterSpacing || "normal",
+              fontSize: `${titleStyle.fontSize}px`,
+              lineHeight: 1,
+              color: titleStyle.textColor,
+              textShadow: titleStyle.shadow,
+              WebkitTextStrokeWidth: titleStyle.strokeWidth ? `${titleStyle.strokeWidth}px` : "0",
+              WebkitTextStrokeColor: titleStyle.strokeColor || "transparent",
+              background: titleStyle.backgroundColor || "transparent",
+              padding: titleStyle.backgroundColor && titleStyle.backgroundColor !== "transparent" ? titleStyle.padding || "20px 40px" : "0px",
+              borderRadius: titleStyle.borderRadius ? titleStyle.borderRadius : 0,
+              backdropFilter: titleStyle.backdropFilter || "none",
+              WebkitBackdropFilter: titleStyle.WebkitBackdropFilter || "none",
+              boxShadow: titleStyle.boxShadow || "none",
+              textAlign: "center",
+              animation: titleStyle.animation === "scale" ? "scale-up 0.5s ease-out" : 
+                         titleStyle.animation === "fade_in" ? "fade-in 0.8s ease-in" : "none",
+            }}
+          >
+            {titleText}
+          </div>
+        </div>
+      )}
 
       {/* Caption overlay */}
       <div

@@ -244,6 +244,11 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS broll_style TEXT NOT NULL DEFAULT 'ful
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'magic-clips';
 
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_text TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_style TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_position TEXT DEFAULT 'center';
+
 ALTER TABLE connected_social_accounts ADD COLUMN IF NOT EXISTS zernio_account_id TEXT;
 ALTER TABLE connected_social_accounts ALTER COLUMN access_token_encrypted DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_zernio_account_id ON connected_social_accounts(zernio_account_id);

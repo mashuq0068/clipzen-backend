@@ -699,23 +699,37 @@ async function burnCaptions(clip, contentType, platforms) {
     const jobId = clip.jobId;
     let style;
     let userCaptionStyle = null;
+    let titleEnabled = false;
+    let titleText = "";
+    let titleStyle = null;
+    let titlePosition = "center";
 
     if (jobId) {
       try {
         const { query } = require("../db/pool");
         const { rows } = await query(
-          `SELECT caption_style FROM jobs WHERE id = $1`,
+          `SELECT caption_style, title_enabled, title_text, title_style, title_position FROM jobs WHERE id = $1`,
           [jobId],
         );
-        if (rows.length > 0 && rows[0].caption_style) {
-          userCaptionStyle = rows[0].caption_style;
-          console.log(
-            `   📝 Found user-selected style in DB: ${userCaptionStyle}`,
-          );
+        if (rows.length > 0) {
+          if (rows[0].caption_style) {
+            userCaptionStyle = rows[0].caption_style;
+            console.log(
+              `   📝 Found user-selected style in DB: ${userCaptionStyle}`,
+            );
+          }
+          titleEnabled = rows[0].title_enabled;
+          titleText = rows[0].title_text || "";
+          try {
+            titleStyle = rows[0].title_style ? JSON.parse(rows[0].title_style) : null;
+          } catch(e) {
+            console.warn("Failed to parse title_style from DB");
+          }
+          titlePosition = rows[0].title_position || "center";
         }
       } catch (dbErr) {
         console.warn(
-          `   ⚠️  Could not fetch caption_style from DB: ${dbErr.message}`,
+          `   ⚠️  Could not fetch job config from DB: ${dbErr.message}`,
         );
       }
     }
@@ -944,7 +958,6 @@ async function burnCaptions(clip, contentType, platforms) {
         level: e.level ?? 1,
       }));
 
-    // Props object — passed directly to renderMedia (no temp file)
     const props = {
       videoSrc: mainVideoUrl,
       words,
@@ -961,8 +974,13 @@ async function burnCaptions(clip, contentType, platforms) {
       contentType: contentType || "general",
       colorGrade: clip.colorGrade || clip.directives?.colorGrade || "none",
       brollSegments,
+      brollStyle: clip.brollStyle || "fullscreen",
       splitTimeline,
       emphasisEvents,
+      titleEnabled,
+      titleText,
+      titleStyle,
+      titlePosition,
     };
 
     const remotionOutput = clip.filePath.replace(".mp4", "_raw.mp4");

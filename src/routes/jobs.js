@@ -43,6 +43,15 @@ router.post(
     }),
     body("brollEnabled").optional().isBoolean(),
     body("brollStyle").optional().isIn(["fullscreen", "pip"]),
+    body("titleEnabled").optional().isBoolean(),
+    body("titleText").optional().isString(),
+    body("titleStyle").optional().custom(value => {
+      if (value !== undefined && typeof value !== 'string' && typeof value !== 'object') {
+        throw new Error('titleStyle must be a string or an object');
+      }
+      return true;
+    }),
+    body("titlePosition").optional().isString(),
   ],
 
   async (req, res) => {
@@ -67,6 +76,10 @@ router.post(
       brollEnabled = false,
       brollStyle = "fullscreen",
       jobType = "magic-clips",
+      titleEnabled = false,
+      titleText = "",
+      titleStyle,
+      titlePosition = "center",
     } = req.body;
 
     try {
@@ -123,10 +136,14 @@ router.post(
           broll_style,
           job_type,
           thumbnail_url,
-          video_title
+          video_title,
+          title_enabled,
+          title_text,
+          title_style,
+          title_position
         )
         VALUES
-        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
         RETURNING *`,
         [
           req.user.id,
@@ -145,6 +162,10 @@ router.post(
           jobType || "magic-clips",
           initialThumbnailUrl,
           videoTitleVal,
+          titleEnabled === true || titleEnabled === "true",
+          titleText,
+          titleStyle && typeof titleStyle === "object" ? JSON.stringify(titleStyle) : (titleStyle || ""),
+          titlePosition || "center",
         ],
       );
 
