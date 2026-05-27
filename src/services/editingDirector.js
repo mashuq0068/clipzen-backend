@@ -231,75 +231,6 @@ const WORD_SIGNALS = {
     "yet",
     "still",
   ],
-  // Slow down captions here
-  slowPace: [
-    "because",
-    "which means",
-    "the reason",
-    "let me explain",
-    "think about",
-    "imagine",
-    "here's what",
-    "what really",
-  ],
-  // Emoji triggers
-  moneyWords: [
-    "million",
-    "billion",
-    "dollar",
-    "money",
-    "rich",
-    "wealth",
-    "profit",
-    "income",
-  ],
-  fireWords: [
-    "fire",
-    "hot",
-    "insane",
-    "crazy",
-    "wild",
-    "unreal",
-    "blazing",
-    "lit",
-  ],
-  winWords: [
-    "won",
-    "win",
-    "champion",
-    "record",
-    "first",
-    "beat",
-    "victory",
-    "achieved",
-  ],
-  mindWords: [
-    "amazing",
-    "mindblowing",
-    "unbelievable",
-    "shocking",
-    "incredible",
-  ],
-  gymWords: [
-    "strong",
-    "workout",
-    "muscle",
-    "lift",
-    "gains",
-    "gym",
-    "fitness",
-    "power",
-  ],
-  ideaWords: ["secret", "hack", "tip", "idea", "method", "strategy", "trick"],
-  goalWords: [
-    "goal",
-    "target",
-    "focus",
-    "vision",
-    "dream",
-    "achieve",
-    "purpose",
-  ],
 };
 
 const TOPIC_SIGNATURES = {
@@ -598,15 +529,29 @@ function buildWordEvents(words) {
         (kw) => w === kw || word.word.toLowerCase().includes(kw),
       )
     ) {
+      // Rotate through creative layouts so peak3 words don't all look the same
+      const peak3Count = events.filter(
+        (e) => e.type === "word_emphasis" && e.level === 3,
+      ).length;
+      // Floating keyword every other peak3 word — cinematic "lifted word" effect
+      const shouldFloat = peak3Count % 2 === 0;
+      // Alternate animation types for visual rhythm
+      const animTypes = ["punch_in", "slam_down", "zoom_burst", "punch_in"];
+      const animationType = animTypes[peak3Count % animTypes.length];
+
       events.push({
         timestamp: t,
         type: "word_emphasis",
         wordIndex: word.index,
         level: 3,
         scale: 1.45,
+        emphasisScale: 1.55,
         colorOverride: "#FFFFFF",
         strokeBoost: 6,
-        beatHoldBefore: 0.18, // freeze previous word briefly before this hits
+        beatHoldBefore: 0.18,
+        floatKeyword: shouldFloat,
+        animationType,
+        captionLayout: shouldFloat ? "float_top" : "impact_center",
       });
       // Hard zoom IN — starts 0.1s early so it lands ON the word
       events.push({
@@ -631,9 +576,13 @@ function buildWordEvents(words) {
         wordIndex: word.index,
         level: 2,
         scale: 1.2,
+        emphasisScale: 1.28,
         colorOverride: "#FFE000",
         strokeBoost: 0,
         beatHoldBefore: 0,
+        floatKeyword: false,
+        animationType: "scale_pop",
+        captionLayout: "inline_hero",
       });
       events.push({
         timestamp: Math.max(0, t - 0.05),
@@ -653,13 +602,17 @@ function buildWordEvents(words) {
         wordIndex: word.index,
         level: 1,
         scale: 1.08,
+        emphasisScale: 1.12,
         colorOverride: null,
         strokeBoost: 0,
         beatHoldBefore: 0,
+        floatKeyword: false,
+        animationType: "pulse",
+        captionLayout: "inline",
       });
     }
 
-    // ── NUMBERS — always yellow ──────────────────────────────
+    // ── NUMBERS — always yellow + slightly larger ────────────
     if (/\b\d[\d,\.]*/.test(word.word)) {
       events.push({
         timestamp: t,
@@ -667,9 +620,13 @@ function buildWordEvents(words) {
         wordIndex: word.index,
         level: 2,
         scale: 1.18,
+        emphasisScale: 1.22,
         colorOverride: "#FFE000",
         strokeBoost: 0,
         beatHoldBefore: 0,
+        floatKeyword: false,
+        animationType: "scale_pop",
+        captionLayout: "inline_hero",
       });
     }
 

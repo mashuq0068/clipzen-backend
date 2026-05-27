@@ -129,6 +129,10 @@ interface WordEmphasisEvent {
   wordIndex: number;
   colorOverride: string | null;
   level: number;
+  emphasisScale?: number; // font-size multiplier (1.0–1.6)
+  floatKeyword?: boolean; // render as floating overlay above caption line
+  animationType?: string; // punch_in | slam_down | zoom_burst | scale_pop | pulse
+  captionLayout?: string; // float_top | impact_center | inline_hero | inline
 }
 
 interface Props {
@@ -267,6 +271,7 @@ interface ActiveStrategyResult {
   fontWeight?: number;
   fontFamily?: string;
   background?: string;
+  backgroundClip?: string;
   webkitBackgroundClip?: string;
   webkitTextFillColor?: string;
   backgroundSize?: string;
@@ -440,13 +445,36 @@ export function computeActiveStrategy(params: {
         "linear-gradient(90deg, #FFFFFF 0%, #D4AF37 25%, #FFFFFF 50%, #D4AF37 75%, #FFFFFF 100%)";
 
       return {
+        color: "transparent",
         background: s.gradient || cinematicGradient,
+        backgroundClip: "text",
         backgroundSize: "200% 100%",
         backgroundPosition: `${sweepPos}% 0`,
         webkitBackgroundClip: "text",
         webkitTextFillColor: "transparent",
         // Add a subtle drop shadow to make it pop even without outline
         textShadow: "0 2px 10px rgba(0,0,0,0.5)",
+      };
+    }
+
+    case "linear_gradient": {
+      const sweepPos = ((frameInGroup % 90) / 90) * 160;
+      const premiumGradient =
+        s.gradient ||
+        "linear-gradient(110deg, #FF4FD8 0%, #8B5CFF 36%, #30D5FF 72%, #FF7A3D 100%)";
+
+      return {
+        color: "transparent",
+        background: premiumGradient,
+        backgroundClip: "text",
+        backgroundSize: s.gradientSize || "180% 100%",
+        backgroundPosition: isActive ? `${sweepPos}% 0` : "50% 0",
+        webkitBackgroundClip: "text",
+        webkitTextFillColor: "transparent",
+        textShadow: isActive
+          ? s.activeGlow ||
+            "0 0 22px rgba(196,84,255,0.42), 0 10px 34px rgba(0,0,0,0.55)"
+          : baseShadow,
       };
     }
     case "rim_light": {
@@ -506,6 +534,8 @@ export const AnimatedWord: React.FC<{
   isAltFont: boolean;
   totalWords: number;
   emphasisColorOverride?: string | null;
+  emphasisScale?: number;
+  animationType?: string;
 }> = ({
   word,
   isActive,
@@ -516,6 +546,8 @@ export const AnimatedWord: React.FC<{
   isAltFont,
   totalWords,
   emphasisColorOverride,
+  emphasisScale = 1.0,
+  animationType,
 }) => {
   const s = captionStyle;
   const baseSize = s.fontSize;
@@ -531,13 +563,36 @@ export const AnimatedWord: React.FC<{
     config: { damping: 16, stiffness: 200, mass: 0.7 },
   });
 
+  // emphasisScale drives dynamic word sizing: peak3=1.55x, peak2=1.28x, peak1=1.12x
+  // This is the core of the "bigger important words" feature
+  const effectiveEmphasisScale =
+    isActive && emphasisScale > 1.0 ? emphasisScale : 1.0;
+
   let fontSize: number;
   if (s.animation === "scale") {
     fontSize = isActive
-      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.03])
+      ? interpolate(
+          activePopSpring,
+          [0, 1],
+          [baseSize * 0.84, baseSize * 1.03],
+        ) * effectiveEmphasisScale
       : baseSize * 0.84;
   } else {
-    fontSize = baseSize;
+    // Non-scale animations: apply emphasisScale smoothly via spring when active
+    if (isActive && emphasisScale > 1.0) {
+      const emphSpring = spring({
+        frame: frameInGroup,
+        fps,
+        config: { damping: 18, stiffness: 280, mass: 0.6 },
+      });
+      fontSize =
+        baseSize *
+        interpolate(emphSpring, [0, 1], [1.0, effectiveEmphasisScale], {
+          extrapolateRight: "clamp",
+        });
+    } else {
+      fontSize = baseSize;
+    }
   }
 
   // ── Per-animation transform / opacity / filter ─────────────
@@ -802,6 +857,99 @@ export const AnimatedWord: React.FC<{
       break;
   }
 
+  // ── animationType — driven by editingDirector emphasis events ──────────
+  // These override/augment the caption style animation for emphasized words.
+  // Only fires when the word is active AND has a special animationType.
+  if (
+    isActive &&
+    animationType &&
+    animationType !== "none" &&
+    animationType !== "pulse"
+  ) {
+    switch (animationType) {
+      // punch_in: word smashes in from large → settles. Peak3 signature move.
+      case "punch_in": {
+        const punchSpring = spring({
+          frame: frameInGroup,
+          fps,
+          config: { damping: 22, stiffness: 500, mass: 0.5 },
+        });
+        const punchScale = interpolate(punchSpring, [0, 1], [2.2, 1.0], {
+          extrapolateRight: "clamp",
+        });
+        const punchOpacity = interpolate(frameInGroup, [0, 3], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        });
+        transform = `scale(${punchScale})`;
+        opacity = punchOpacity;
+        break;
+      }
+      // slam_down: drops from above with heavy impact feel
+      case "slam_down": {
+        const slamSpring = spring({
+          frame: frameInGroup,
+          fps,
+          config: { damping: 28, stiffness: 600, mass: 0.8 },
+        });
+        const yVal = interpolate(slamSpring, [0, 1], [-120, 0], {
+          extrapolateRight: "clamp",
+        });
+        const scaleVal = interpolate(slamSpring, [0, 1], [1.4, 1.0], {
+          extrapolateRight: "clamp",
+        });
+        const slamOpacity = interpolate(frameInGroup, [0, 2], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        });
+        transform = `translateY(${yVal}px) scale(${scaleVal})`;
+        opacity = slamOpacity;
+        break;
+      }
+      // zoom_burst: explosive scale-in from tiny → overshoot → settle
+      case "zoom_burst": {
+        const burstSpring = spring({
+          frame: frameInGroup,
+          fps,
+          config: { damping: 10, stiffness: 450, mass: 0.4 },
+        });
+        const burstScale = interpolate(burstSpring, [0, 1], [0.0, 1.12], {
+          extrapolateRight: "clamp",
+        });
+        const burstOpacity = interpolate(frameInGroup, [0, 2], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        });
+        transform = `scale(${burstScale})`;
+        opacity = burstOpacity;
+        break;
+      }
+      // scale_pop: clean pop — used for peak2 words
+      case "scale_pop": {
+        const popSpring = spring({
+          frame: frameInGroup,
+          fps,
+          config: { damping: 14, stiffness: 320, mass: 0.6 },
+        });
+        const popScale = interpolate(popSpring, [0, 1], [0.6, 1.0], {
+          extrapolateRight: "clamp",
+        });
+        transform = `scale(${Math.min(popScale, 1.08)})`;
+        opacity = interpolate(frameInGroup, [0, 4], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        });
+        break;
+      }
+    }
+  }
+
+  // pulse: continuous heartbeat on active word (peak1)
+  if (isActive && animationType === "pulse") {
+    const pulseScale = 1.0 + Math.sin(frameInGroup * 0.22) * 0.04;
+    transform = `scale(${pulseScale})`;
+  }
+
   // ── Active strategy ───────────────────────────────────────
   const activeResult = computeActiveStrategy({
     isActive,
@@ -915,6 +1063,8 @@ export const AnimatedWord: React.FC<{
         letterSpacing: activeResult.letterSpacing || letterSpacing,
 
         background: isBgSlide ? undefined : activeResult.background,
+
+        backgroundClip: isBgSlide ? undefined : activeResult.backgroundClip,
 
         WebkitBackgroundClip: isBgSlide
           ? undefined
@@ -1061,6 +1211,108 @@ export const AnimatedWord: React.FC<{
 };
 
 // ─────────────────────────────────────────────────────────────
+// FLOATING KEYWORD OVERLAY
+// Renders peak3 words that have floatKeyword=true as a separate
+// cinematic overlay — positioned above the main caption line,
+// larger, with its own punch-in animation. Creates the "hero word"
+// effect seen in premium CapCut/After Effects edits.
+// ─────────────────────────────────────────────────────────────
+const FloatingKeyword: React.FC<{
+  word: string;
+  style: StyleConfig;
+  fps: number;
+  colorOverride: string | null;
+  emphasisScale: number;
+  animationType?: string;
+}> = ({ word, style: s, fps, colorOverride, emphasisScale, animationType }) => {
+  const frame = useCurrentFrame();
+
+  // Punch-in spring: explosive entry
+  const entrySpring = spring({
+    frame,
+    fps,
+    config: { damping: 20, stiffness: 480, mass: 0.45 },
+  });
+
+  // Scale: starts 2.4x → settles to emphasisScale × base
+  const scaleVal = interpolate(entrySpring, [0, 1], [2.4, 1.0], {
+    extrapolateRight: "clamp",
+  });
+
+  // Opacity: flash in instantly
+  const opacityVal = interpolate(frame, [0, 3], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // Vertical shake on entry — impact feel
+  const shakeY =
+    frame < 8
+      ? interpolate(frame, [0, 3, 5, 7, 8], [0, -12, 6, -3, 0], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        })
+      : 0;
+
+  const displayWord = s.uppercase ? word.toUpperCase() : word;
+  const floatFontSize = s.fontSize * emphasisScale * 1.1;
+
+  const color = colorOverride || s.activeColor || "#FFFFFF";
+
+  const outlineColor =
+    s.strokeWidth > 0 && s.strokeColor !== "transparent"
+      ? s.strokeColor
+      : "rgba(0,0,0,0.95)";
+  const outlineSize = Math.max(4, Math.min(14, s.strokeWidth * 0.9));
+  const outlineShadow = buildOutlineShadow(outlineColor, outlineSize);
+
+  // Glow halo behind the floating word — cinematic depth
+  const glowColor = color.replace(/#([0-9a-f]{6})/i, (_, hex) => {
+    return `rgba(${parseInt(hex.slice(0, 2), 16)},${parseInt(hex.slice(2, 4), 16)},${parseInt(hex.slice(4, 6), 16)},0.45)`;
+  });
+  const glowShadow = `0 0 40px ${glowColor}, 0 0 80px ${glowColor}`;
+  const finalShadow = [outlineShadow, glowShadow].filter(Boolean).join(", ");
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        // Float above the main caption area — top 30% of frame for dramatic effect
+        top: "28%",
+        left: 0,
+        right: 0,
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        zIndex: 25,
+        pointerEvents: "none",
+        transform: `scale(${scaleVal}) translateY(${shakeY}px)`,
+        opacity: opacityVal,
+        transformOrigin: "center center",
+      }}
+    >
+      <span
+        style={{
+          fontFamily: `'${s.fontFamily}', sans-serif`,
+          fontWeight: s.fontWeight,
+          fontSize: floatFontSize,
+          color,
+          textShadow: finalShadow,
+          textTransform: s.uppercase ? "uppercase" : "none",
+          letterSpacing: s.letterSpacing || "normal",
+          userSelect: "none",
+          display: "inline-block",
+          // Subtle rotation for handcrafted feel
+          rotate: animationType === "slam_down" ? "-2deg" : "1.5deg",
+        }}
+      >
+        {displayWord}
+      </span>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // B-ROLL OVERLAY
 // ─────────────────────────────────────────────────────────────
 const BrollOverlay: React.FC<{
@@ -1173,10 +1425,52 @@ export const CaptionedVideo: React.FC<Props> = ({
     splitTimeline.some((seg) => t >= seg.startSec && t < seg.endSec);
 
   const effectiveLayout = isInSplitMoment ? "center" : style.layout;
+
+  // ── Floating keyword — peak3 words that should "lift" above the line ──
+  // Find the active word's emphasis event and check if it wants to float
+  const activeWordForFloat =
+    effectiveActiveIdx >= 0 ? words[effectiveActiveIdx] : null;
+  const floatEmphasisEntry = activeWordForFloat
+    ? emphasisEvents.find(
+        (e) =>
+          e.wordIndex === activeWordForFloat.index && e.floatKeyword === true,
+      )
+    : null;
+  const showFloatingKeyword = !!floatEmphasisEntry && effectiveActiveIdx >= 0;
+
+  // When a floating keyword is showing, nudge the caption group down slightly
+  // so the two layers don't overlap — creates clear visual hierarchy
+  const captionYOffset = showFloatingKeyword ? 40 : 0;
+
+  // Alternate caption X position between groups for dynamic rhythm
+  // Even groups: slightly left-of-center; odd groups: slightly right-of-center
+  // This breaks the "static subtitle" feel and adds CapCut-style composition
+  const groupPositionDrift =
+    style.layout === "bottom-center" && !isInSplitMoment
+      ? currentGroupIndex % 3 === 0
+        ? -18 // slight left
+        : currentGroupIndex % 3 === 1
+          ? 18 // slight right
+          : 0 // centered
+      : 0;
+
   const layoutStyle = getLayoutPosition(
     effectiveLayout,
     isInSplitMoment ? undefined : style,
   );
+
+  // Apply dynamic offsets on top of base layout
+  const dynamicLayoutStyle: React.CSSProperties = {
+    ...layoutStyle,
+    transform:
+      [
+        layoutStyle.transform,
+        captionYOffset !== 0 ? `translateY(${captionYOffset}px)` : "",
+        groupPositionDrift !== 0 ? `translateX(${groupPositionDrift}px)` : "",
+      ]
+        .filter(Boolean)
+        .join(" ") || undefined,
+  };
   const flexAlign = getFlexAlign(effectiveLayout);
   const alignItems = getAlignItems(effectiveLayout);
 
@@ -1210,54 +1504,139 @@ export const CaptionedVideo: React.FC<Props> = ({
         <BrollOverlay key={i} segment={seg} fps={fps} />
       ))}
 
-      {/* Title Overlay */}
-      {titleEnabled && titleText && titleStyle && (
-        <div
-          style={{
-            position: "absolute",
-            zIndex: 15,
-            width: "100%",
-            display: "flex",
+      {titleEnabled &&
+        titleText &&
+        titleStyle &&
+        (() => {
+          const ts = titleStyle as any;
+          const displayText = ts.uppercase
+            ? titleText.toUpperCase()
+            : titleText;
+
+          const hasGradient = !!ts._gradientOverride;
+          const gradient = ts._gradientOverride ?? "";
+
+          const hasBox =
+            ts.backgroundColor &&
+            ts.backgroundColor !== "transparent" &&
+            !ts.backgroundColor.startsWith("rgba(0,0,0,0)");
+
+          // Resolve borderRadius from backgroundShape
+          const shape = ts.backgroundShape || "none";
+          let computedRadius: number = ts.borderRadius ?? 0;
+          if (shape === "pill") computedRadius = 100;
+          if (shape === "tape")
+            computedRadius = Math.min(6, ts.borderRadius ?? 4);
+          if (shape === "message") computedRadius = ts.borderRadius ?? 20;
+          if (shape === "rectangle") computedRadius = ts.borderRadius ?? 10;
+
+          // Remotion canvas is 1080px tall — fontSize is already in canvas-px units
+          const fontSize = Math.min(ts.fontSize || 72, 96);
+
+          const textStyle: React.CSSProperties = {
+            fontFamily: `'${ts.fontFamily}', sans-serif`,
+            fontWeight: ts.fontWeight,
+            fontStyle: ts.fontStyle || "normal",
+            textTransform: ts.uppercase ? "uppercase" : "none",
+            letterSpacing: ts.letterSpacing || "normal",
+            fontSize,
+            lineHeight: 1.15,
+            color: hasGradient ? "transparent" : ts.textColor,
+            textShadow:
+              ts.shadow && ts.shadow !== "none" ? ts.shadow : undefined,
+            WebkitTextStrokeWidth: ts.strokeWidth ? `${ts.strokeWidth}px` : "0",
+            WebkitTextStrokeColor: ts.strokeColor || "transparent",
+            background: hasGradient ? gradient : "transparent",
+            backgroundClip: hasGradient ? "text" : "border-box",
+            WebkitBackgroundClip: hasGradient ? "text" : "unset",
+            WebkitTextFillColor: hasGradient ? "transparent" : "unset",
+            textAlign: "center",
+            wordBreak: "break-word",
+            display: "block",
+          };
+
+          const containerStyle: React.CSSProperties = {
+            display: "inline-flex",
+            alignItems: "center",
             justifyContent: "center",
-            top: titlePosition === "top" ? 150 : titlePosition === "center" ? "50%" : "auto",
-            bottom: titlePosition === "bottom" ? 150 : "auto",
-            transform: titlePosition === "center" ? "translateY(-50%)" : "none",
-          }}
+            position: "relative",
+            background: hasBox ? ts.backgroundColor : "transparent",
+            padding: hasBox ? ts.padding || "16px 36px" : "0",
+            borderRadius: hasBox ? computedRadius : 0,
+            boxShadow: ts.boxShadow || undefined,
+          };
+
+          return (
+            <div
+              style={{
+                position: "absolute",
+                zIndex: 15,
+                width: "100%",
+                left: 0,
+                display: "flex",
+                justifyContent: "center",
+                top:
+                  titlePosition === "top"
+                    ? 150
+                    : titlePosition === "center"
+                      ? "50%"
+                      : "auto",
+                bottom: titlePosition === "bottom" ? 200 : "auto",
+                transform:
+                  titlePosition === "center" ? "translateY(-50%)" : "none",
+              }}
+            >
+              <div style={containerStyle}>
+                <span style={textStyle}>{displayText}</span>
+
+                {/* Message bubble tail */}
+                {shape === "message" && hasBox && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      bottom: -14,
+                      left: 32,
+                      width: 0,
+                      height: 0,
+                      borderLeft: "10px solid transparent",
+                      borderRight: "10px solid transparent",
+                      borderTop: `14px solid ${ts.backgroundColor}`,
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+      {/* Floating keyword — peak3 impact words that lift above the caption line */}
+      {showFloatingKeyword && activeWordForFloat && floatEmphasisEntry && (
+        <Sequence
+          from={Math.floor(activeWordForFloat.startSec * fps)}
+          durationInFrames={Math.max(
+            1,
+            Math.ceil(
+              (activeWordForFloat.endSec - activeWordForFloat.startSec + 0.35) *
+                fps,
+            ),
+          )}
         >
-          <div
-            style={{
-              fontFamily: `'${titleStyle.fontFamily}', sans-serif`,
-              fontWeight: titleStyle.fontWeight,
-              fontStyle: titleStyle.fontStyle || "normal",
-              textTransform: titleStyle.uppercase ? "uppercase" : "none",
-              letterSpacing: titleStyle.letterSpacing || "normal",
-              fontSize: `${titleStyle.fontSize}px`,
-              lineHeight: 1,
-              color: titleStyle.textColor,
-              textShadow: titleStyle.shadow,
-              WebkitTextStrokeWidth: titleStyle.strokeWidth ? `${titleStyle.strokeWidth}px` : "0",
-              WebkitTextStrokeColor: titleStyle.strokeColor || "transparent",
-              background: titleStyle.backgroundColor || "transparent",
-              padding: titleStyle.backgroundColor && titleStyle.backgroundColor !== "transparent" ? titleStyle.padding || "20px 40px" : "0px",
-              borderRadius: titleStyle.borderRadius ? titleStyle.borderRadius : 0,
-              backdropFilter: titleStyle.backdropFilter || "none",
-              WebkitBackdropFilter: titleStyle.WebkitBackdropFilter || "none",
-              boxShadow: titleStyle.boxShadow || "none",
-              textAlign: "center",
-              animation: titleStyle.animation === "scale" ? "scale-up 0.5s ease-out" : 
-                         titleStyle.animation === "fade_in" ? "fade-in 0.8s ease-in" : "none",
-            }}
-          >
-            {titleText}
-          </div>
-        </div>
+          <FloatingKeyword
+            word={activeWordForFloat.word}
+            style={style}
+            fps={fps}
+            colorOverride={floatEmphasisEntry.colorOverride}
+            emphasisScale={floatEmphasisEntry.emphasisScale ?? 1.55}
+            animationType={floatEmphasisEntry.animationType}
+          />
+        </Sequence>
       )}
 
       {/* Caption overlay */}
       <div
         style={{
           position: "absolute",
-          ...layoutStyle,
+          ...dynamicLayoutStyle,
           zIndex: 10,
         }}
       >
@@ -1374,6 +1753,8 @@ export const CaptionedVideo: React.FC<Props> = ({
                   isAltFont={isAltFont}
                   totalWords={groupWords.length}
                   emphasisColorOverride={emphasisColorOverride}
+                  emphasisScale={emphasisEntry?.emphasisScale ?? 1.0}
+                  animationType={emphasisEntry?.animationType}
                 />
               );
             })}

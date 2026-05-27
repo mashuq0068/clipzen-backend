@@ -50,3 +50,28 @@
   font-family: "Chewy";
   src: url("../public/fonts/chewy.ttf") format("truetype");  
 }
+ @keyframes title-scale {
+      from { opacity: 0; transform: scale(0.6); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+    @keyframes title-fade-in {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    @keyframes title-slide-up {
+      from { opacity: 0; transform: translateY(40px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes title-slide-down {
+      from { opacity: 0; transform: translateY(-40px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes title-swing {
+      from { opacity: 0; transform: rotate(-8deg) scale(0.85); }
+      to   { opacity: 1; transform: rotate(0deg) scale(1); }
+    }
+    @keyframes title-glitch {
+      0%   { opacity: 0; transform: translateX(-6px) skewX(-4deg); }
+      50%  { opacity: 1; transform: translateX(4px)  skewX(2deg);  }
+      100% { opacity: 1; transform: translateX(0)     skewX(0deg);  }
+    }

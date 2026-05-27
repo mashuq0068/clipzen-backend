@@ -8,12 +8,13 @@
 import { Composition, registerRoot } from "remotion";
 import { CaptionedVideo } from "./CaptionedVideo";
 import "./styles.css";
-import { EditorPanel, RemotionTest } from "./RemotionTest";
+import { RemotionTest } from "./RemotionTest";
+import { RemotionTitleTest } from "./RemotionTitleTest";
 
 export const RemotionRoot = () => {
   return (
     <>
-      
+      {/* ── Caption style preview (existing) ── */}
       <Composition
         id="CaptionPreview"
         component={RemotionTest}
@@ -23,6 +24,22 @@ export const RemotionRoot = () => {
         // 8 words × 0.55s ≈ 4.4s → ~132 frames.  200 gives safe headroom.
         durationInFrames={200}
       />
+
+      {/* ── Title style preview (NEW) ────────────────────────────────────────
+           Pick any title from the dropdown in the Remotion player.
+           Gradient-text styles use SVG fill instead of WebkitBackgroundClip
+           so they render correctly during encoding too.
+      ─────────────────────────────────────────────────────────────────────── */}
+      <Composition
+        id="TitlePreview"
+        component={RemotionTitleTest}
+        fps={30}
+        width={1080}
+        height={1920}
+        durationInFrames={200}
+      />
+
+      {/* ── Full captioned clip (existing) ── */}
       <Composition
         id="CaptionedClip"
         component={CaptionedVideo}
