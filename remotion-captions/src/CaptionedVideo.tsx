@@ -79,6 +79,7 @@ export interface StyleConfig {
   sweepDuration?: number;
   gradient?: string;
   gradientSize?: string;
+  glowColor?: string;
   alternateFontFamily?: string;
   alternateFontWeight?: number;
   alternateUppercase?: boolean;
@@ -494,6 +495,46 @@ export function computeActiveStrategy(params: {
       return {
         color: "#FFFFFF",
         textShadow: `0 0 ${innerGlow}px ${activeColor}, 0 0 ${outerGlow}px ${activeColor}BB, 0 0 ${farGlow}px ${activeColor}44`,
+      };
+    }
+
+    // ── gradient_glow ──────────────────────────────────────────
+    // Every word gets the gradient text fill AND a constant soft halo glow.
+    // The active word: brighter pulsing glow + animated gradient sweep.
+    // This is the premium Instagram/TikTok feel — readable, always luminous,
+    // active word still snaps your eye without losing the look on neighbors.
+    //
+    // Fields read: gradient, gradientSize, glowColor, activeGlow.
+    // Falls back to a pink→purple→cyan premium gradient if none given.
+    case "gradient_glow": {
+      const premiumGradient =
+        s.gradient ||
+        "linear-gradient(115deg, #FFE1F7 0%, #FF4FD8 25%, #8B5CFF 55%, #30D5FF 85%, #FFFFFF 100%)";
+      const glowColor = s.glowColor || s.activeColor || "#FF4FD8";
+
+      // Constant baseline glow on every word
+      const baseGlow = `0 0 10px ${glowColor}66, 0 0 26px ${glowColor}33, 0 8px 28px rgba(0,0,0,0.55)`;
+
+      // Active gets pulsing brighter glow + a continuously sweeping gradient
+      const pulse = Math.sin(frameInGroup * 0.18) * 0.5 + 0.5;
+      const activeInner = Math.round(14 + pulse * 14);
+      const activeOuter = Math.round(34 + pulse * 24);
+      const activeFar = Math.round(60 + pulse * 28);
+      const activeGlowStr =
+        s.activeGlow ||
+        `0 0 ${activeInner}px ${glowColor}, 0 0 ${activeOuter}px ${glowColor}AA, 0 0 ${activeFar}px ${glowColor}55, 0 10px 34px rgba(0,0,0,0.55)`;
+
+      const sweepPos = ((frameInGroup % 90) / 90) * 160;
+
+      return {
+        color: "transparent",
+        background: premiumGradient,
+        backgroundClip: "text",
+        backgroundSize: s.gradientSize || "200% 100%",
+        backgroundPosition: isActive ? `${sweepPos}% 0` : "50% 0",
+        webkitBackgroundClip: "text",
+        webkitTextFillColor: "transparent",
+        textShadow: isActive ? activeGlowStr : baseGlow,
       };
     }
 
