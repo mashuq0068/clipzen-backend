@@ -11,7 +11,6 @@
     "worker:render": "node src/workers/videoWorker.js",
     "worker:publishing": "node src/workers/publishingWorker.js"
   },
-
   "dependencies": {
     "@remotion/bundler": "^4.0.438",
     "@remotion/cli": "^4.0.438",
@@ -37,9 +36,9 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "remotion": "^4.0.438",
+    "resend": "^4.8.0",
     "uuid": "^9.0.1"
   },
-  
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.8.0",

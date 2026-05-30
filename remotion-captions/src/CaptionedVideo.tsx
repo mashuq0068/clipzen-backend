@@ -99,6 +99,12 @@ export interface StyleConfig {
   positionTransform?: string;
   offsetX?: number;
   offsetY?: number;
+
+  // ── Uniform glow on every word (toggle on top of any style) ──
+  allWordsGlow?: boolean;
+  glowAllColor?: string;
+  glowAllIntensity?: number;
+
 }
 
 interface Word {
@@ -260,6 +266,26 @@ export function buildOutlineShadow(strokeColor: string, size: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ALL-WORDS GLOW
+// Soft luminous halo painted under EVERY word when the
+// `allWordsGlow` toggle is on. Replaces the strategy's own
+// textShadow so every word reads with the same glow intensity
+// (no extra brightness on the active word — by design).
+// Intensity is a multiplier (default 1).
+// ─────────────────────────────────────────────────────────────
+export function buildAllWordsGlow(
+  color: string,
+  frame: number,
+  intensity: number = 1,
+): string {
+  const breathe = Math.sin(frame * 0.12) * 0.5 + 0.5;
+  const inner = Math.round((8 + breathe * 6) * intensity);
+  const mid = Math.round((22 + breathe * 14) * intensity);
+  const outer = Math.round((44 + breathe * 24) * intensity);
+  return `0 0 ${inner}px ${color}, 0 0 ${mid}px ${color}AA, 0 0 ${outer}px ${color}55`;
+}
+
+// ─────────────────────────────────────────────────────────────
 // ACTIVE STRATEGY RESULT TYPE
 // ─────────────────────────────────────────────────────────────
 interface ActiveStrategyResult {
@@ -315,7 +341,7 @@ export function computeActiveStrategy(params: {
   baseOpacity: number;
   baseTransform: string;
 }): ActiveStrategyResult {
-  const { isActive, captionStyle: s, frameInGroup, fps } = params;
+  const { isActive, captionStyle: s, frameInGroup, fps, index } = params;
   const baseShadow = s.shadow && s.shadow !== "none" ? s.shadow : undefined;
 
   switch (s.activeStrategy) {
@@ -432,29 +458,44 @@ export function computeActiveStrategy(params: {
     }
 
     // ── shimmer ────────────────────────────────────────────────
-    // FIXED: Seamless looping gold gradient sweep on the active word.
-    // Uses modulo-based position (not clamp) so the loop never jumps.
+    // Cinematic gold look on the active word.
+    //
+    // FIX: the old version used `background: linear-gradient(...)`
+    // + `backgroundClip: text` + `color: transparent` to paint a
+    // sweeping gradient through the glyphs. That technique is
+    // unreliable in Remotion's headless renderer — when the
+    // text-fill clip fails, the glyphs stay transparent and the
+    // word reads as a black smear (only the drop shadow is visible).
+    //
+    // New approach: paint the glyphs with a solid gold color and
+    // sell the "shimmer" via a pulsing multi-layer text-shadow
+    // (cream highlight + warm gold halo). No backgroundClip, no
+    // -webkit-text-fill-color, no transparent text — gold is
+    // guaranteed to land regardless of renderer quirks.
     case "shimmer": {
       if (!isActive) {
         return { color: s.textColor, textShadow: baseShadow };
       }
-      // Smooth loop: position cycles 0→200% over 60 frames continuously
-      const sweepPos = ((frameInGroup % 45) / 45) * 200;
 
-      // High-end cinematic gradient (Silver/Gold/White mix)
-      const cinematicGradient =
-        "linear-gradient(90deg, #FFFFFF 0%, #D4AF37 25%, #FFFFFF 50%, #D4AF37 75%, #FFFFFF 100%)";
+      const goldFill = s.activeColor || "#FFD700";      // main glyph color
+      const highlight = "#FFF8DC";                       // bright cream halo
+      const deepGold = "#C9A227";                        // warm outer glow
+
+      // Continuous pulse — keeps the word "alive" without sweeping
+      // a gradient position, which is what failed before.
+      const pulse = Math.sin(frameInGroup * 0.22) * 0.5 + 0.5;
+      const innerRing = Math.round(6 + pulse * 6);
+      const midGlow = Math.round(18 + pulse * 14);
+      const outerGlow = Math.round(40 + pulse * 24);
 
       return {
-        color: "transparent",
-        background: s.gradient || cinematicGradient,
-        backgroundClip: "text",
-        backgroundSize: "200% 100%",
-        backgroundPosition: `${sweepPos}% 0`,
-        webkitBackgroundClip: "text",
-        webkitTextFillColor: "transparent",
-        // Add a subtle drop shadow to make it pop even without outline
-        textShadow: "0 2px 10px rgba(0,0,0,0.5)",
+        color: goldFill,
+        textShadow: [
+          `0 0 ${innerRing}px ${highlight}`,
+          `0 0 ${midGlow}px ${goldFill}DD`,
+          `0 0 ${outerGlow}px ${deepGold}88`,
+          `0 2px 10px rgba(0,0,0,0.55)`,
+        ].join(", "),
       };
     }
 
@@ -1031,7 +1072,18 @@ export const AnimatedWord: React.FC<{
     ? buildOutlineShadow(outlineColor, outlineSize)
     : undefined;
 
+  // All-words glow toggle wins over the strategy's textShadow —
+  // every word gets the same halo regardless of active state.
+  const allWordsGlowShadow = s.allWordsGlow
+    ? buildAllWordsGlow(
+        s.glowAllColor || s.activeColor || "#FFE88A",
+        frameInGroup,
+        s.glowAllIntensity ?? 1,
+      )
+    : undefined;
+
   const dropShadow =
+    allWordsGlowShadow ??
     activeResult.textShadow ??
     (s.shadow && s.shadow !== "none" ? s.shadow : undefined);
 

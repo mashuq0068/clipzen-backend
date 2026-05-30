@@ -55,7 +55,7 @@ async function handleEditVideo(dbJob, videoPath, jobId, userId, helpers) {
   console.log(`\nTranscribing...`);
   console.log(`\nAnalyzing layout...`);
   const [segments, clipTimeline] = await Promise.all([
-    transcribeVideo(videoPath),
+    transcribeVideo(videoPath, dbJob.language),
     analyzeClipTimelineForClip(videoPath, analysisClip),
   ]);
   const transcriptJson = JSON.stringify(segments);

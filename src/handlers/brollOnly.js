@@ -21,7 +21,7 @@ async function handleBrollOnly(dbJob, videoPath, jobId, userId, helpers) {
   const brollStyle = dbJob.broll_style || "fullscreen";
 
   console.log(`\nTranscribing for B-roll placement...`);
-  const segments = await transcribeVideo(videoPath);
+  const segments = await transcribeVideo(videoPath, dbJob.language);
   const transcript = segments.map((s) => s.text).join(" ");
   const lastEnd = segments[segments.length - 1]?.endSec || 60;
 

@@ -11,6 +11,7 @@ router.get("/me", async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT u.id, u.email, u.name, u.plan, u.avatar_url, u.created_at,
+              u.provider, u.email_verified,
               p.default_clip_count, p.default_platforms, p.default_language
        FROM users u
        LEFT JOIN user_preferences p ON p.user_id = u.id
@@ -38,6 +39,8 @@ router.get("/me", async (req, res) => {
         name: u.name,
         plan: u.plan,
         avatarUrl: u.avatar_url,
+        provider: u.provider,
+        emailVerified: u.email_verified,
         createdAt: u.created_at,
         preferences: {
           defaultClipCount: u.default_clip_count,

@@ -51,7 +51,7 @@ async function handleMagicClips(dbJob, videoPath, jobId, userId, helpers) {
   let brollFolder = null;
 
   console.log(`\nTranscribing...`);
-  const segments = await transcribeVideo(videoPath);
+  const segments = await transcribeVideo(videoPath, dbJob.language);
   console.log(`\nSelecting story clips...`);
   const selectedClips = await selectClips(
     segments,

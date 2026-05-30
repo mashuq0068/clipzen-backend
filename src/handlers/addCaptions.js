@@ -10,7 +10,7 @@ async function handleAddCaptions(dbJob, videoPath, jobId, userId) {
   const platforms = dbJob.platforms || ["tiktok"];
 
   // ── Step 1: Transcribe ────────────────────────────────────────────────────
-  const segments = await transcribeVideo(videoPath);
+  const segments = await transcribeVideo(videoPath, dbJob.language);
   const wordTimings = extractWordTimingsForClip(segments, 0, 999999);
 
   const clip = {

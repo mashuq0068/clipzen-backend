@@ -2,7 +2,7 @@ const { query } = require("../db/pool");
 const { transcribeVideo } = require("../services/transcriber");
 
 async function handleTranscribe(dbJob, videoPath, jobId, userId) {
-  const segments = await transcribeVideo(videoPath);
+  const segments = await transcribeVideo(videoPath, dbJob.language);
   // Store segments as JSON so frontend can show timeline
   const transcriptJson = JSON.stringify(segments);
   

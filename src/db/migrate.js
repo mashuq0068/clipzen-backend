@@ -253,6 +253,33 @@ ALTER TABLE connected_social_accounts ADD COLUMN IF NOT EXISTS zernio_account_id
 ALTER TABLE connected_social_accounts ALTER COLUMN access_token_encrypted DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_connected_social_accounts_zernio_account_id ON connected_social_accounts(zernio_account_id);
 
+-- ── EMAIL VERIFICATION + OAuth PROVIDERS ──────────────────────
+-- Users can sign up via email/password (must verify email) or Google (auto-verified).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'email'
+  CHECK (provider IN ('email', 'google'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_provider_provider_id
+  ON users(provider, provider_id) WHERE provider_id IS NOT NULL;
+-- Google users have no password — drop the NOT NULL constraint.
+ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+
+-- Email verification + password reset codes.
+-- type: 'verify_email' (6-digit OTP) | 'reset_password' (long random token)
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,
+  type        TEXT NOT NULL CHECK (type IN ('verify_email', 'reset_password')),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_verification_codes_user_id
+  ON email_verification_codes(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_verification_codes_code
+  ON email_verification_codes(code) WHERE used_at IS NULL;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_connected_social_accounts_updated_at') THEN

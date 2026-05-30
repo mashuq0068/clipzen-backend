@@ -13,7 +13,7 @@ function extractWordTimingsForStitchedClip(transcriptSegments, clipSegments) {
         const wEnd = w.end ?? w.endSec ?? wStart + 0.1;
         if (wStart >= segStart - 0.15 && wStart < segEnd + 0.15) {
           allWords.push({
-            word: (w.word || w.text || "").replace(/[^\w\s'''-]/g, "").trim(),
+            word: (w.word || w.text || "").replace(/[^\p{L}\p{M}\p{N}\s'''-]/gu, "").trim(),
             startSec: wStart,
             endSec: wEnd,
             index: 0,

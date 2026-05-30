@@ -1096,7 +1096,7 @@ async function burnCaptions(clip, contentType, platforms) {
       const tpw = Math.min(clipDurationSecs, raw.length / 2.5) / raw.length;
       words = raw
         .map((word, i) => ({
-          word: word.replace(/[^\w\s'''-]/g, "").trim(),
+          word: word.replace(/[^\p{L}\p{M}\p{N}\s'''-]/gu, "").trim(),
           startSec: i * tpw,
           endSec: (i + 1) * tpw,
           index: i,
