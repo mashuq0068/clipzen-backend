@@ -51,6 +51,9 @@ async function handleAddCaptions(dbJob, videoPath, jobId, userId) {
       captionPosition: "bottom",
       brollSegments: [],
       splitTimeline: [],
+      // Add-captions = overlay only. Keep the source's ORIGINAL resolution/
+      // aspect ratio — do NOT reframe/crop into the default 1080x1920 canvas.
+      preserveOriginalSize: true,
     },
     "general",
     platforms

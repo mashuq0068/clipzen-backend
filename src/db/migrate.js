@@ -248,6 +248,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_enabled BOOLEAN DEFAULT FALSE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_text TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_style TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_position TEXT DEFAULT 'center';
+-- 'custom' = use title_text as-is, 'auto' = LLM writes the title from the transcript
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title_mode TEXT DEFAULT 'custom';
 
 ALTER TABLE connected_social_accounts ADD COLUMN IF NOT EXISTS zernio_account_id TEXT;
 ALTER TABLE connected_social_accounts ALTER COLUMN access_token_encrypted DROP NOT NULL;

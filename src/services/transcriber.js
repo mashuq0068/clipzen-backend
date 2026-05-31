@@ -24,7 +24,14 @@ const SM_POLL_INTERVAL_MS = Number.parseInt(process.env.SPEECHMATICS_POLL_INTERV
 // Acts as a fallback sentence boundary for languages/audio with little punctuation.
 const MAX_SEGMENT_GAP_SEC = Number.parseFloat(process.env.SPEECHMATICS_MAX_GAP_SEC || "1.5");
 
-// ── Whisper fallback config (used only if no Speechmatics key) ───────
+// ── Engine toggle ───────────────────────────────────────────────────
+// IS_WHISPER=true  → force the local Whisper setup (previous setup).
+// Otherwise        → Speechmatics (current default), with Whisper as a
+//                    fallback only when no Speechmatics key is present.
+const USE_WHISPER =
+  String(process.env.IS_WHISPER || "").toLowerCase().trim() === "true";
+
+// ── Whisper config (forced engine or fallback) ──────────────────────
 const PYTHON = process.env.PYTHON_PATH || "python3";
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "base";
 const WHISPER_THREADS = Math.max(
@@ -72,7 +79,10 @@ async function transcribeVideo(videoPath, language = "en") {
 
     // ── Step 2: Transcribe ────────────────────────────────────
     let segments;
-    if (SM_API_KEY) {
+    if (USE_WHISPER) {
+      console.log("🎙️  IS_WHISPER=true → using local Whisper");
+      segments = await transcribeWithWhisper(audioPath, outputDir);
+    } else if (SM_API_KEY) {
       segments = await transcribeWithSpeechmatics(audioPath, lang);
     } else {
       console.warn("⚠️  SPEECHMATICS_API_KEY not set — falling back to local Whisper");

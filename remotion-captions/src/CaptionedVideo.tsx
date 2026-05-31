@@ -121,6 +121,7 @@ interface EmojiOverlay {
   x: number;
   y: number;
   size: number;
+  anim?: string; // entrance style: pop | drop | bounce | spin | zoom | float
 }
 
 interface BrollSegment {
@@ -156,6 +157,7 @@ interface Props {
   titleText?: string;
   titleStyle?: any;
   titlePosition?: string;
+  fitMode?: "cover" | "contain"; // "contain" = never crop (add-captions)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1469,6 +1471,7 @@ export const CaptionedVideo: React.FC<Props> = ({
   titleText,
   titleStyle,
   titlePosition,
+  fitMode = "cover",
 }) => {
   const frame = useCurrentFrame();
   const t = frame / fps;
@@ -1490,7 +1493,7 @@ export const CaptionedVideo: React.FC<Props> = ({
       <AbsoluteFill style={{ overflow: "hidden" }}>
         <OffthreadVideo
           src={resolveVideoSrc(videoSrc)}
-          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          style={{ width: "100%", height: "100%", objectFit: fitMode }}
         />
         {brollSegments.map((seg, i) => (
           <BrollOverlay key={i} segment={seg} fps={fps} />
@@ -1567,19 +1570,79 @@ export const CaptionedVideo: React.FC<Props> = ({
   const flexAlign = getFlexAlign(effectiveLayout);
   const alignItems = getAlignItems(effectiveLayout);
 
-  const ICON_DURATION = 2.5;
+  const ICON_DURATION = 2.0;
   const activeOverlays = emojiOverlays.filter(
     (o) => t >= o.atSec && t < o.atSec + ICON_DURATION,
   );
 
+  // easeOutBack — overshoot for a lively, springy entrance
+  const easeOutBack = (x: number) => {
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+  };
+  const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3);
+
   const iconAnimations = activeOverlays.map((o) => {
     const elapsed = t - o.atSec;
     const progress = elapsed / ICON_DURATION;
-    const popProgress = Math.min(1, elapsed / 0.25);
-    const fadeProgress = progress > 0.7 ? (progress - 0.7) / 0.3 : 0;
-    const scale = 0.3 + 0.7 * Math.min(1, popProgress * 1.2);
-    const opacity = popProgress - fadeProgress;
-    return { overlay: o, scale, opacity };
+
+    // Entrance over the first 0.35s, fade out over the last 25%
+    const inP = Math.min(1, elapsed / 0.35);
+    const outP = progress > 0.75 ? (progress - 0.75) / 0.25 : 0;
+    const opacity = Math.max(0, Math.min(1, inP) - outP);
+
+    // Subtle idle bob so the icon feels alive while it's held
+    const idleBob = Math.sin(elapsed * 6.5) * 4 * Math.min(1, inP);
+
+    let scale = 1;
+    let translateY = 0;
+    let rotate = 0;
+
+    switch (o.anim) {
+      case "drop": {
+        // fall in from above with a soft settle
+        const e = easeOutBack(inP);
+        translateY = -60 * (1 - e) + idleBob;
+        scale = 0.85 + 0.15 * Math.min(1, inP);
+        break;
+      }
+      case "bounce": {
+        // springy scale overshoot
+        scale = 0.2 + (1.0 - 0.2) * easeOutBack(inP);
+        translateY = idleBob;
+        break;
+      }
+      case "spin": {
+        // rotate-in
+        rotate = -180 * (1 - easeOutCubic(inP));
+        scale = 0.4 + 0.6 * easeOutCubic(inP);
+        translateY = idleBob;
+        break;
+      }
+      case "zoom": {
+        // shrink from oversized down to normal
+        scale = 1.8 - 0.8 * easeOutCubic(inP);
+        translateY = idleBob;
+        break;
+      }
+      case "float": {
+        // gentle fade-up + continuous floating
+        scale = 0.7 + 0.3 * easeOutCubic(inP);
+        translateY = 24 * (1 - easeOutCubic(inP)) + idleBob * 1.6;
+        break;
+      }
+      case "pop":
+      default: {
+        // classic quick pop (matches the previous behaviour)
+        const popProgress = Math.min(1, elapsed / 0.25);
+        scale = 0.3 + 0.7 * Math.min(1, popProgress * 1.2);
+        translateY = idleBob;
+        break;
+      }
+    }
+
+    return { overlay: o, scale, opacity, translateY, rotate };
   });
 
   const hasBox =
@@ -1591,7 +1654,7 @@ export const CaptionedVideo: React.FC<Props> = ({
     <AbsoluteFill style={{ overflow: "hidden" }}>
       <OffthreadVideo
         src={resolveVideoSrc(videoSrc)}
-        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        style={{ width: "100%", height: "100%", objectFit: fitMode }}
       />
       {brollSegments.map((seg, i) => (
         <BrollOverlay key={i} segment={seg} fps={fps} />
@@ -1757,7 +1820,7 @@ export const CaptionedVideo: React.FC<Props> = ({
           )}
 
           {/* Icon overlays */}
-          {iconAnimations.map(({ overlay, scale, opacity }, idx) => {
+          {iconAnimations.map(({ overlay, scale, opacity, translateY, rotate }, idx) => {
             const iconSize = overlay.size ?? 100;
             const isEmoji = !!overlay.emoji;
             return (
@@ -1767,7 +1830,7 @@ export const CaptionedVideo: React.FC<Props> = ({
                   position: "absolute",
                   left: "50%",
                   top: -(iconSize + 12),
-                  transform: `translateX(-50%) scale(${scale})`,
+                  transform: `translateX(-50%) translateY(${translateY}px) rotate(${rotate}deg) scale(${scale})`,
                   opacity: Math.max(0, Math.min(1, opacity)),
                   zIndex: 20,
                   pointerEvents: "none",

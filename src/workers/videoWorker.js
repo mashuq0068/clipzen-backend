@@ -197,6 +197,16 @@ const worker = new Worker(
         brollFolder = handlerResult.brollFolder;
       }
 
+      // Push clips + thumbnails to Cloudinary, save URLs, then delete the
+      // local outputs/<jobId> folder (clips, thumbnails, b-roll — everything).
+      try {
+        const { finalizeJobAssets } = require("../services/jobFinalizer");
+        await finalizeJobAssets(jobId);
+        brollFolder = null; // folder already removed by finalize
+      } catch (finErr) {
+        console.warn(`Finalize/cleanup warning: ${finErr.message}`);
+      }
+
       await query("UPDATE jobs SET status = 'done' WHERE id = $1", [jobId]);
       console.log(`\nDONE: Job ${jobId}\n`);
     } catch (err) {

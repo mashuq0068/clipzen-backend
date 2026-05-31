@@ -51,8 +51,14 @@ export const RemotionRoot = () => {
         calculateMetadata={({ props }) => {
           const durationSecs = props?.clipDurationSecs || 60; // fallback 60s
           const fps = props?.fps || 30;
+          // Dimensions are driven by props so add-captions can keep the SOURCE
+          // size (no reframe). Defaults to vertical 1080x1920 for everything else.
+          const width = props?.renderWidth || 1080;
+          const height = props?.renderHeight || 1920;
           return {
             durationInFrames: Math.ceil(durationSecs * fps),
+            width,
+            height,
           };
         }}
         defaultProps={{

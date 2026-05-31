@@ -44,6 +44,7 @@ router.post(
     body("brollEnabled").optional().isBoolean(),
     body("brollStyle").optional().isIn(["fullscreen", "pip"]),
     body("titleEnabled").optional().isBoolean(),
+    body("titleMode").optional().isIn(["auto", "custom"]),
     body("titleText").optional().isString(),
     body("titleStyle").optional().custom(value => {
       if (value !== undefined && typeof value !== 'string' && typeof value !== 'object') {
@@ -77,6 +78,7 @@ router.post(
       brollStyle = "fullscreen",
       jobType = "magic-clips",
       titleEnabled = false,
+      titleMode = "custom",
       titleText = "",
       titleStyle,
       titlePosition = "center",
@@ -140,10 +142,11 @@ router.post(
           title_enabled,
           title_text,
           title_style,
-          title_position
+          title_position,
+          title_mode
         )
         VALUES
-        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        ($1,'pending',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
         RETURNING *`,
         [
           req.user.id,
@@ -166,6 +169,7 @@ router.post(
           titleText,
           titleStyle && typeof titleStyle === "object" ? JSON.stringify(titleStyle) : (titleStyle || ""),
           titlePosition || "center",
+          titleMode === "auto" ? "auto" : "custom",
         ],
       );
 

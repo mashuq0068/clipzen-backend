@@ -34,6 +34,10 @@ const {
   SVG_EMOJI_FALLBACK,
 } = require("./iconSystem");
 
+// LLM-driven emoji director (context-aware, well-timed). Falls back to the
+// rule-based iconSystem above when the LLM is unavailable or fails.
+const { buildIconOverlaysLLM } = require("./iconDirector");
+
 const execAsync = util.promisify(exec);
 const execFileAsync = util.promisify(execFile);
 
@@ -754,6 +758,145 @@ async function probeVideoDuration(filePath) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// PHYSICAL VIDEO DIMENSIONS PROBE
+// Used by the "add-captions" flow to render at the SOURCE resolution
+// (no reframe/crop) instead of the default vertical 1080x1920 canvas.
+// ─────────────────────────────────────────────────────────────
+async function probeVideoDimensions(filePath) {
+  // ── Method 1: ffprobe (execFile args array — no Windows shell-quoting issues)
+  try {
+    const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
+    const { stdout } = await execFileAsync(
+      ffprobe,
+      [
+        "-v", "quiet",
+        "-print_format", "json",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        filePath,
+      ],
+      { timeout: 15_000 },
+    );
+    const info = JSON.parse(stdout);
+    const s = info?.streams?.[0];
+    const w = parseInt(s?.width, 10);
+    const h = parseInt(s?.height, 10);
+    if (w > 0 && h > 0) {
+      console.log(`      🔎 Dimensions via ffprobe: ${w}x${h}`);
+      return { width: w, height: h };
+    }
+  } catch (e) {
+    console.warn(`      ⚠️  ffprobe failed (${e.message.split("\n")[0]}) — trying ffmpeg`);
+  }
+
+  // ── Method 2: parse `ffmpeg -i` stderr (ffmpeg is always available here)
+  try {
+    const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
+    let text = "";
+    try {
+      // ffmpeg with no output exits non-zero but prints stream info to stderr
+      const { stderr } = await execFileAsync(ffmpeg, ["-i", filePath], { timeout: 15_000 });
+      text = stderr || "";
+    } catch (e) {
+      text = (e.stderr || e.message || "").toString();
+    }
+    // Stream #0:0 ... Video: h264 ..., 1920x1080 [SAR 1:1 DAR 16:9], ...
+    const m = text.match(/Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/);
+    if (m) {
+      const w = parseInt(m[1], 10);
+      const h = parseInt(m[2], 10);
+      if (w > 0 && h > 0) {
+        console.log(`      🔎 Dimensions via ffmpeg: ${w}x${h}`);
+        return { width: w, height: h };
+      }
+    }
+    console.warn(`      ⚠️  Could not parse dimensions from ffmpeg output`);
+    return null;
+  } catch (e) {
+    console.warn(`      ⚠️  ffmpeg dimension probe failed: ${e.message.split("\n")[0]}`);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AUTO TITLE (LLM)
+// ─────────────────────────────────────────────────────────────
+
+/** Flatten a clip.transcript (segments JSON or string) into plain text. */
+function transcriptText(transcript) {
+  if (!transcript) return "";
+  if (typeof transcript === "string") {
+    const s = transcript.trim();
+    if (s.startsWith("[")) {
+      try {
+        const arr = JSON.parse(s);
+        if (Array.isArray(arr)) {
+          return arr.map((seg) => seg.text || "").join(" ").trim();
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    return s;
+  }
+  if (Array.isArray(transcript)) {
+    return transcript.map((seg) => seg.text || "").join(" ").trim();
+  }
+  return "";
+}
+
+/**
+ * Generate a short, catchy on-screen title from the transcript using the LLM.
+ * Writes in the SAME language as the content. Returns `fallback` on any failure
+ * (LLM unavailable / empty / error) so the title overlay never breaks.
+ */
+async function generateAutoTitle(text, fallback) {
+  const clean = (text || "").replace(/\s+/g, " ").trim().slice(0, 1500);
+  if (!clean) return fallback;
+  try {
+    const { isLLMAvailable, llmWithRetry } = require("./llmProvider");
+    if (!(await isLLMAvailable())) return fallback;
+
+    const prompt = `You are writing the on-screen TITLE for a short-form video. The title must capture the MAIN IDEA of the clip in a way a viewer instantly understands.
+
+Transcript of the clip:
+"""
+${clean}
+"""
+
+Rules:
+- First understand what the clip is actually about, then write ONE title that summarizes its main point.
+- It MUST be a COMPLETE, grammatical, meaningful phrase that makes sense on its own — NOT a cut-off fragment or a random list of words.
+- Keep it concise: about 4 to 8 words.
+- Write it in the SAME language as the transcript above.
+- No quotes, no emoji, no hashtags, no trailing punctuation.
+- Output ONLY the final title text on a single line, nothing else.`;
+
+    // maxTokens must be generous — non-Latin scripts (Bengali, Hindi, etc.)
+    // use many tokens per word, so a low cap truncates the title mid-word.
+    const out = await llmWithRetry(
+      { prompt, maxTokens: 120, temperature: 0.6 },
+      1,
+      1200,
+    );
+    const title = (out || "")
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) // first non-empty line
+      ?.replace(/^["'`]+|["'`]+$/g, "")
+      .replace(/[.!?]+$/, "")
+      .trim();
+    if (title && title.length >= 2) return title.slice(0, 120);
+    return fallback;
+  } catch (err) {
+    console.warn(
+      `   ⚠️  Auto title failed: ${err?.message?.split("\n")[0]} — using fallback`,
+    );
+    return fallback;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // COMPUTED DURATION FROM CLIP PLAN
 // ─────────────────────────────────────────────────────────────
 function computeClipDuration(clip) {
@@ -975,12 +1118,13 @@ async function burnCaptions(clip, contentType, platforms) {
     let titleText = "";
     let titleStyle = null;
     let titlePosition = "center";
+    let titleMode = "custom";
 
     if (jobId) {
       try {
         const { query } = require("../db/pool");
         const { rows } = await query(
-          `SELECT caption_style, title_enabled, title_text, title_style, title_position FROM jobs WHERE id = $1`,
+          `SELECT caption_style, title_enabled, title_text, title_style, title_position, title_mode FROM jobs WHERE id = $1`,
           [jobId],
         );
         if (rows.length > 0) {
@@ -992,6 +1136,7 @@ async function burnCaptions(clip, contentType, platforms) {
           }
           titleEnabled = rows[0].title_enabled;
           titleText = rows[0].title_text || "";
+          titleMode = rows[0].title_mode || "custom";
           try {
             titleStyle = rows[0].title_style ? JSON.parse(rows[0].title_style) : null;
           } catch(e) {
@@ -1004,6 +1149,18 @@ async function burnCaptions(clip, contentType, platforms) {
           `   ⚠️  Could not fetch job config from DB: ${dbErr.message}`,
         );
       }
+    }
+
+    // Auto title: let the LLM write a short catchy overlay from this clip's
+    // transcript (in the same language). Falls back to the clip title / typed
+    // text if the LLM is unavailable.
+    if (titleEnabled && titleMode === "auto") {
+      const generated = await generateAutoTitle(
+        transcriptText(clip.transcript),
+        titleText || clip.title || "",
+      );
+      titleText = generated;
+      console.log(`   🏷️  Auto title (LLM): "${titleText}"`);
     }
 
     if (userCaptionStyle) {
@@ -1061,6 +1218,46 @@ async function burnCaptions(clip, contentType, platforms) {
     console.log(
       `      ⏱  Computed: ${computedDuration.toFixed(1)}s | Physical: ${physicalDuration?.toFixed(1) ?? "unknown"}s | Rendering: ${clipDurationSecs.toFixed(1)}s (${durationInFrames}f)`,
     );
+
+    // ── OUTPUT DIMENSIONS ─────────────────────────────────────
+    // Default: vertical 1080x1920 canvas (magic-clips / edit-video / reframer
+    // all reframe the source into this portrait frame).
+    // For "add-captions" the source must keep its ORIGINAL size — we only
+    // overlay captions, no reframe/crop. We render at the source resolution
+    // so objectFit:"cover" fills the frame exactly (matching aspect → no crop).
+    let renderWidth = 1080;
+    let renderHeight = 1920;
+    if (clip.preserveOriginalSize) {
+      const dims = await probeVideoDimensions(clip.filePath);
+      if (dims) {
+        let { width, height } = dims;
+        // Cap the longest side so Remotion/Chromium stays fast & within memory
+        // on 4K sources — aspect ratio is preserved exactly.
+        const MAX_SIDE = 1920;
+        const longest = Math.max(width, height);
+        if (longest > MAX_SIDE) {
+          const scale = MAX_SIDE / longest;
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        // h264 requires even dimensions
+        renderWidth = width - (width % 2);
+        renderHeight = height - (height % 2);
+        const orient =
+          dims.width > dims.height
+            ? "LANDSCAPE"
+            : dims.width < dims.height
+              ? "PORTRAIT"
+              : "SQUARE";
+        console.log(
+          `      📐 Add-captions: SOURCE is ${dims.width}x${dims.height} (${orient}) → output ${renderWidth}x${renderHeight} — NO reframe, original aspect kept`,
+        );
+      } else {
+        console.warn(
+          `      ⚠️  Could not probe source dimensions — falling back to 1080x1920`,
+        );
+      }
+    }
 
     // ── WORDS ─────────────────────────────────────────────────
     let words;
@@ -1207,8 +1404,13 @@ async function burnCaptions(clip, contentType, platforms) {
     const sfxOnlyOverlays = (emojiOverlays || []).filter(
       (o) => !o.icon && !o.emoji && o.sfxFile,
     );
-    const ruleIcons = buildIconOverlaysFromTranscript(words, clipDurationSecs);
-    emojiOverlays = [...sfxOnlyOverlays, ...ruleIcons];
+    // Try the LLM director first (context-relevant, varied, well-timed emoji).
+    // Fall back to the rule-based engine if it returns nothing.
+    let contentIcons = await buildIconOverlaysLLM(words, clipDurationSecs);
+    if (!contentIcons || contentIcons.length === 0) {
+      contentIcons = buildIconOverlaysFromTranscript(words, clipDurationSecs);
+    }
+    emojiOverlays = [...sfxOnlyOverlays, ...contentIcons];
 
     checkIconPaths(emojiOverlays);
     checkSFXPaths(emojiOverlays);
@@ -1257,6 +1459,13 @@ async function burnCaptions(clip, contentType, platforms) {
       titleText,
       titleStyle,
       titlePosition,
+      // Add-captions: render at source size + "contain" so the video is NEVER
+      // cropped (no reframe). Other services keep "cover" to fill 1080x1920.
+      fitMode: clip.preserveOriginalSize ? "contain" : "cover",
+      // Output dimensions — consumed by the composition's calculateMetadata
+      // (this is what actually sets the render size, NOT renderMedia args).
+      renderWidth,
+      renderHeight,
     };
 
     const remotionOutput = clip.filePath.replace(".mp4", "_raw.mp4");
@@ -1297,14 +1506,16 @@ async function burnCaptions(clip, contentType, platforms) {
       ? Number.parseInt(process.env.RENDER_CRF || "20", 10)
       : 20;
 
+    // Dimensions come from the composition (set by calculateMetadata using
+    // renderWidth/renderHeight props) — overriding here is unreliable.
+    console.log(`      🖼  Render canvas: ${composition.width}x${composition.height}`);
+
     await renderMedia({
       composition,
       serveUrl,
       codec: "h264",
       outputLocation: remotionOutput,
       inputProps: props,
-      width: 1080,
-      height: 1920,
       crf: renderCrf,
       pixelFormat: "yuv420p",
       chromiumOptions: {
