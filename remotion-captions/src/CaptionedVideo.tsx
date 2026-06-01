@@ -167,6 +167,15 @@ export function getStrokeValue(s: StyleConfig): string | undefined {
   return undefined;
 }
 
+// Soft colored glow for emphasized words — a subtle premium "pop" that reads
+// as quality on reels (vs. just making the word huge). Adds an alpha to hex
+// colors; passes named/rgba colors through.
+function softGlow(color: string | undefined, px: number): string {
+  const hex = /^#([0-9a-fA-F]{6})$/.exec(color || "");
+  const c = hex ? `#${hex[1]}73` : (color || "rgba(255,255,255,0.45)"); // 0x73 ≈ 45%
+  return `0 0 ${Math.round(px)}px ${c}`;
+}
+
 export function getLayoutPosition(
   layout: string,
   style?: StyleConfig,
@@ -647,36 +656,18 @@ export const AnimatedWord: React.FC<{
     config: { damping: 16, stiffness: 200, mass: 0.7 },
   });
 
-  // emphasisScale drives dynamic word sizing: peak3=1.55x, peak2=1.28x, peak1=1.12x
-  // This is the core of the "bigger important words" feature
-  const effectiveEmphasisScale =
-    isActive && emphasisScale > 1.0 ? emphasisScale : 1.0;
-
+  // QUALITY EMPHASIS: we no longer scale fontSize for emphasis — changing the
+  // font size of a word inside a flex-wrapped line reflows the whole line, which
+  // makes every other word jump (the "not smooth / low quality" look). Emphasis
+  // is now applied purely via transform: scale() further below (transforms don't
+  // affect layout, so the line stays rock-steady). fontSize here is layout-only.
   let fontSize: number;
   if (s.animation === "scale") {
     fontSize = isActive
-      ? interpolate(
-          activePopSpring,
-          [0, 1],
-          [baseSize * 0.84, baseSize * 1.03],
-        ) * effectiveEmphasisScale
+      ? interpolate(activePopSpring, [0, 1], [baseSize * 0.84, baseSize * 1.03])
       : baseSize * 0.84;
   } else {
-    // Non-scale animations: apply emphasisScale smoothly via spring when active
-    if (isActive && emphasisScale > 1.0) {
-      const emphSpring = spring({
-        frame: frameInGroup,
-        fps,
-        config: { damping: 18, stiffness: 280, mass: 0.6 },
-      });
-      fontSize =
-        baseSize *
-        interpolate(emphSpring, [0, 1], [1.0, effectiveEmphasisScale], {
-          extrapolateRight: "clamp",
-        });
-    } else {
-      fontSize = baseSize;
-    }
+    fontSize = baseSize;
   }
 
   // ── Per-animation transform / opacity / filter ─────────────
@@ -951,17 +942,18 @@ export const AnimatedWord: React.FC<{
     animationType !== "pulse"
   ) {
     switch (animationType) {
-      // punch_in: word smashes in from large → settles. Peak3 signature move.
+      // punch_in: word springs in from slightly large → settles. Subtle &
+      // smooth (was a jarring 2.2x smash). Emphasis scale layers on top.
       case "punch_in": {
         const punchSpring = spring({
           frame: frameInGroup,
           fps,
-          config: { damping: 22, stiffness: 500, mass: 0.5 },
+          config: { damping: 26, stiffness: 300, mass: 0.7 },
         });
-        const punchScale = interpolate(punchSpring, [0, 1], [2.2, 1.0], {
+        const punchScale = interpolate(punchSpring, [0, 1], [1.35, 1.0], {
           extrapolateRight: "clamp",
         });
-        const punchOpacity = interpolate(frameInGroup, [0, 3], [0, 1], {
+        const punchOpacity = interpolate(frameInGroup, [0, 4], [0, 1], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
         });
@@ -969,20 +961,20 @@ export const AnimatedWord: React.FC<{
         opacity = punchOpacity;
         break;
       }
-      // slam_down: drops from above with heavy impact feel
+      // slam_down: gentle drop-in with a soft settle (was a heavy -120px slam)
       case "slam_down": {
         const slamSpring = spring({
           frame: frameInGroup,
           fps,
-          config: { damping: 28, stiffness: 600, mass: 0.8 },
+          config: { damping: 26, stiffness: 360, mass: 0.8 },
         });
-        const yVal = interpolate(slamSpring, [0, 1], [-120, 0], {
+        const yVal = interpolate(slamSpring, [0, 1], [-42, 0], {
           extrapolateRight: "clamp",
         });
-        const scaleVal = interpolate(slamSpring, [0, 1], [1.4, 1.0], {
+        const scaleVal = interpolate(slamSpring, [0, 1], [1.12, 1.0], {
           extrapolateRight: "clamp",
         });
-        const slamOpacity = interpolate(frameInGroup, [0, 2], [0, 1], {
+        const slamOpacity = interpolate(frameInGroup, [0, 3], [0, 1], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
         });
@@ -990,17 +982,17 @@ export const AnimatedWord: React.FC<{
         opacity = slamOpacity;
         break;
       }
-      // zoom_burst: explosive scale-in from tiny → overshoot → settle
+      // zoom_burst: smooth scale-in (was explosive 0 -> overshoot). Settles at 1.
       case "zoom_burst": {
         const burstSpring = spring({
           frame: frameInGroup,
           fps,
-          config: { damping: 10, stiffness: 450, mass: 0.4 },
+          config: { damping: 18, stiffness: 260, mass: 0.6 },
         });
-        const burstScale = interpolate(burstSpring, [0, 1], [0.0, 1.12], {
+        const burstScale = interpolate(burstSpring, [0, 1], [0.55, 1.0], {
           extrapolateRight: "clamp",
         });
-        const burstOpacity = interpolate(frameInGroup, [0, 2], [0, 1], {
+        const burstOpacity = interpolate(frameInGroup, [0, 3], [0, 1], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
         });
@@ -1058,6 +1050,32 @@ export const AnimatedWord: React.FC<{
     }
   }
 
+  // ── QUALITY EMPHASIS — smooth, capped transform-scale (no line reflow) ──
+  // The director sends emphasisScale 1.12–1.55; we compress that into a
+  // tasteful 1.04–1.18 and ease it in with ONE well-damped spring (minimal
+  // overshoot). Applied as transform so the caption line never jumps.
+  let emphActive = false;
+  if (isActive && emphasisScale > 1.0) {
+    emphActive = true;
+    const emphSpring = spring({
+      frame: frameInGroup,
+      fps,
+      config: { damping: 20, stiffness: 190, mass: 0.85 },
+    });
+    const emphTarget = Math.min(1.18, 1 + (emphasisScale - 1) * 0.42);
+    const emphScale = interpolate(emphSpring, [0, 1], [1.0, emphTarget], {
+      extrapolateRight: "clamp",
+    });
+    const baseT =
+      activeResult.transform && activeResult.transform !== "none"
+        ? activeResult.transform
+        : transform && transform !== "none"
+          ? transform
+          : "";
+    activeResult.transform = `${baseT} scale(${emphScale.toFixed(3)})`.trim();
+    transformOrigin = "center center"; // clean, layout-stable scaling pivot
+  }
+
   // ── Outline shadow ────────────────────────────────────────
   const outlineColor =
     s.strokeWidth > 0 && s.strokeColor !== "transparent"
@@ -1089,11 +1107,16 @@ export const AnimatedWord: React.FC<{
     activeResult.textShadow ??
     (s.shadow && s.shadow !== "none" ? s.shadow : undefined);
 
+  // Subtle colored glow on emphasized words — premium "pop" without size jumps.
+  const emphGlow = emphActive
+    ? softGlow(emphasisColorOverride || s.activeColor || "#FFFFFF", baseSize * 0.16)
+    : undefined;
+
   // Gradient strategies use webkit fill — skip the outline shadow
   // (they conflict with -webkit-text-fill-color)
   const finalTextShadow = activeResult.webkitTextFillColor
-    ? dropShadow
-    : [outlineShadow, dropShadow].filter(Boolean).join(", ") || undefined;
+    ? [emphGlow, dropShadow].filter(Boolean).join(", ") || undefined
+    : [outlineShadow, emphGlow, dropShadow].filter(Boolean).join(", ") || undefined;
 
   const isBgSlide = s.activeStrategy === "bg_slide";
   const letterSpacing = s.letterSpacing || "normal";
@@ -1322,35 +1345,37 @@ const FloatingKeyword: React.FC<{
 }> = ({ word, style: s, fps, colorOverride, emphasisScale, animationType }) => {
   const frame = useCurrentFrame();
 
-  // Punch-in spring: explosive entry
+  // Entry spring: smooth, well-damped (was an explosive 2.4x/shake combo that
+  // read as low-quality). Settles cleanly with minimal overshoot.
   const entrySpring = spring({
     frame,
     fps,
-    config: { damping: 20, stiffness: 480, mass: 0.45 },
+    config: { damping: 24, stiffness: 280, mass: 0.7 },
   });
 
-  // Scale: starts 2.4x → settles to emphasisScale × base
-  const scaleVal = interpolate(entrySpring, [0, 1], [2.4, 1.0], {
+  // Scale: gentle 1.5x → 1.0 settle
+  const scaleVal = interpolate(entrySpring, [0, 1], [1.5, 1.0], {
     extrapolateRight: "clamp",
   });
 
-  // Opacity: flash in instantly
-  const opacityVal = interpolate(frame, [0, 3], [0, 1], {
+  // Opacity: smooth fade-in
+  const opacityVal = interpolate(frame, [0, 5], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  // Vertical shake on entry — impact feel
+  // Tiny settle nudge instead of a hard shake — subtle, premium.
   const shakeY =
-    frame < 8
-      ? interpolate(frame, [0, 3, 5, 7, 8], [0, -12, 6, -3, 0], {
+    frame < 9
+      ? interpolate(frame, [0, 4, 7, 9], [0, -5, 2, 0], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
         })
       : 0;
 
   const displayWord = s.uppercase ? word.toUpperCase() : word;
-  const floatFontSize = s.fontSize * emphasisScale * 1.1;
+  // Hero word is prominent but capped (was up to 1.7x of base → too much).
+  const floatFontSize = s.fontSize * Math.min(1.35, 1 + (emphasisScale - 1) * 0.5);
 
   const color = colorOverride || s.activeColor || "#FFFFFF";
 
@@ -1720,6 +1745,10 @@ export const CaptionedVideo: React.FC<Props> = ({
             padding: hasBox ? ts.padding || "16px 36px" : "0",
             borderRadius: hasBox ? computedRadius : 0,
             boxShadow: ts.boxShadow || undefined,
+            // Cap the width so the title never spans edge-to-edge — leaves a
+            // left/right margin and wraps long titles inside the box instead.
+            maxWidth: "84%",
+            boxSizing: "border-box",
           };
 
           return (

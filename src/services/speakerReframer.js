@@ -271,6 +271,58 @@ async function probe(videoPath) {
   };
 }
 
+// ─── Scene-cut detection ──────────────────────────────────────────────────────
+// One decode-only FFmpeg pass over [startSec, endSec]. Returns the absolute
+// video timestamps (seconds) of hard cuts. Used to snap layout boundaries to the
+// exact frame a scene changes (instead of the coarse YOLO sample grid).
+// Soft dissolves / UI-FX don't produce a sharp scene spike → no cut → we fall
+// back to the sample grid (honoring the "noise passes through" design).
+const SCENE_CUT_THRESHOLD = parseFloat(process.env.REFRAMER_SCENE_THRESHOLD || "0.30");
+
+async function detectSceneCuts(videoPath, startSec, endSec) {
+  const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
+  const dur = Math.max(0, endSec - startSec);
+  if (dur <= 0) return [];
+  try {
+    // -ss before -i = input seek; output pts_time restarts near 0 → add startSec.
+    const { stderr } = await execFileAsync(
+      ffmpeg,
+      [
+        "-hide_banner",
+        "-ss", String(startSec),
+        "-t", String(dur),
+        "-i", videoPath,
+        "-vf", `select='gt(scene,${SCENE_CUT_THRESHOLD})',showinfo`,
+        "-an", "-f", "null", "-",
+      ],
+      { timeout: 120_000, maxBuffer: 32 * 1024 * 1024 },
+    );
+    const text = stderr || "";
+    const cuts = [];
+    const re = /pts_time:([0-9.]+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const rel = parseFloat(m[1]);
+      if (Number.isFinite(rel)) cuts.push(parseFloat((startSec + rel).toFixed(3)));
+    }
+    cuts.sort((a, b) => a - b);
+    console.log(`[reframer/scene] ${cuts.length} scene cut(s) in ${startSec.toFixed(1)}→${endSec.toFixed(1)}s`);
+    return cuts;
+  } catch (e) {
+    console.warn(`[reframer/scene] detection failed: ${(e.message || e).split("\n")[0]}`);
+    return [];
+  }
+}
+
+// First scene cut strictly inside the (lo, hi] gap between two samples, or null.
+function findCutInGap(cuts, lo, hi) {
+  for (const c of cuts) {
+    if (c > lo + 0.04 && c <= hi + 0.001) return c;
+    if (c > hi) break; // cuts are sorted
+  }
+  return null;
+}
+
 // ─── Generic Python script runner ─────────────────────────────────────────────
 async function _runScript(scriptPath, videoPath, payload) {
   ensureTmp();
@@ -526,10 +578,21 @@ function classifyFrame(trackedFaces, sceneChange = false) {
 
   const sorted = [...significant].sort((a, b) => b.area - a.area);
 
-  // Single dominant face
+  // Single dominant face.
+  // The tiny-ratio short-circuit collapses to 1 person when the 2nd face is
+  // <25% of the primary's area — but that wrongly swallows ASYMMETRIC 2-person
+  // shots (one speaker closer to camera). Exception: if the 2nd face is a clear
+  // separate person — decent ABSOLUTE area AND horizontally separated — keep it
+  // as 2 faces so split/face_left/right can trigger. Tiny background faces
+  // (small absolute area or not separated) still collapse to 1.
+  const secondIsRealPerson =
+    sorted.length >= 2 &&
+    sorted[1].area >= SPLIT_MIN_FACE_AREA &&
+    Math.abs(sorted[1].cx - sorted[0].cx) >= SPLIT_MIN_CX_DIFF;
+
   if (
     sorted.length === 1 ||
-    sorted[1].area / sorted[0].area < SECOND_FACE_TINY_RATIO
+    (sorted[1].area / sorted[0].area < SECOND_FACE_TINY_RATIO && !secondIsRealPerson)
   ) {
     return {
       mode: "face",
@@ -640,7 +703,7 @@ class FaceTracker {
  *
  * Returns: [{ start, end, frames: [{t, decision}] }]
  */
-function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
+function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec, sceneCuts = []) {
   const tracker = new FaceTracker();
 
   // 1. Classify every sampled frame
@@ -653,9 +716,15 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
 
   if (!classified.length) return [];
 
-  // 2. Segment with confirmation window
+  // 2. Segment with confirmation window.
+  //    A boundary commits when the new mode is confirmed for BOUNDARY_CONFIRM_FRAMES
+  //    OR when a real scene cut sits in the flip gap. A cut-aligned boundary is
+  //    snapped to the cut timestamp and tagged hardCut (it bypasses the
+  //    confirmation requirement and downstream merge/smooth erosion).
   const segments = [];
-  let   segStart = 0; // index into classified
+  let   segStart        = 0;    // index into classified
+  let   pendingSnap     = null; // snapped start time for the segment beginning at segStart
+  let   pendingHardCut  = false;
 
   let i = 0;
   while (i < classified.length) {
@@ -669,9 +738,14 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
 
     if (flipIdx >= classified.length) {
       // No flip found — rest of clip is same mode
-      segments.push({ startIdx: segStart, endIdx: classified.length - 1 });
+      segments.push({ startIdx: segStart, endIdx: classified.length - 1, snapStart: pendingSnap, hardCut: pendingHardCut });
       break;
     }
+
+    // Is there a real scene cut between the last old-mode sample and the new one?
+    const gapLo = classified[flipIdx - 1].t;
+    const gapHi = classified[flipIdx].t;
+    const cut   = findCutInGap(sceneCuts, gapLo, gapHi);
 
     // Check if flip holds for BOUNDARY_CONFIRM_FRAMES
     const confirmEnd = Math.min(flipIdx + BOUNDARY_CONFIRM_FRAMES, classified.length);
@@ -679,10 +753,16 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
     const confirmed  = classified.slice(flipIdx, confirmEnd)
       .every(f => f.normMode === newMode);
 
-    if (confirmed) {
-      segments.push({ startIdx: segStart, endIdx: flipIdx - 1 });
-      segStart = flipIdx;
-      i        = flipIdx;
+    if (cut !== null || confirmed) {
+      // Commit boundary. Cut present → snap new segment start to the cut & lock it.
+      segments.push({ startIdx: segStart, endIdx: flipIdx - 1, snapStart: pendingSnap, hardCut: pendingHardCut });
+      segStart       = flipIdx;
+      pendingSnap    = cut;            // null when confirmed-without-cut
+      pendingHardCut = cut !== null;
+      i              = flipIdx;
+      if (cut !== null) {
+        console.log(`[reframer/seg] hard cut @ ${cut.toFixed(2)}s → snapping ${currentMode}→${newMode} boundary`);
+      }
     } else {
       // Noise — skip past this blip and keep looking from flipIdx+1
       i = flipIdx + 1;
@@ -713,7 +793,12 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
     }
 
     const total     = Object.values(votes).reduce((s, v) => s + v, 0) || 1;
-    const [winMode] = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+    // Deterministic tie-break: on equal votes prefer the more informative
+    // layout (split > blur_overlay > face > passthrough) instead of the old
+    // insertion order which silently favoured "face".
+    const TIE_ORDER = { split: 0, blur_overlay: 1, face: 2, passthrough: 3 };
+    const [winMode] = Object.entries(votes)
+      .sort((a, b) => b[1] - a[1] || (TIE_ORDER[a[0]] - TIE_ORDER[b[0]]))[0];
     const winFrac   = votes[winMode] / total;
     const avg       = (arr, key) =>
       arr.length ? arr.reduce((s, p) => s + p[key], 0) / arr.length : null;
@@ -754,6 +839,9 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec) {
       decision,
       votes,
       winFrac,
+      // Boundary metadata for snapping + lock-through-merge/smooth
+      snapStart: seg.snapStart ?? null,
+      hardCut:   seg.hardCut === true,
     };
   });
 }
@@ -793,7 +881,11 @@ function mergeShortSegments(segments, minSecs) {
         (mode === "face" || _isFaceMode(mode)) &&
         dur >= MIN_FACE_PROTECT_SECS;
 
-      if (dur < minSecs && segs.length > 1 && !isFaceProtected) {
+      // Protect cut-aligned segments — a real scene cut to a new layout must
+      // survive even if it's shorter than MIN_SEGMENT_SECS.
+      const isHardCut = segs[i].hardCut === true;
+
+      if (dur < minSecs && segs.length > 1 && !isFaceProtected && !isHardCut) {
         const prevSeg = out.length > 0 ? out[out.length - 1] : null;
         const nextSeg = i + 1 < segs.length ? segs[i + 1] : null;
 
@@ -831,14 +923,21 @@ function mergeShortSegments(segments, minSecs) {
 function expandToTimeline(segments, clipStartSec, clipEndSec) {
   const timeline = [];
   for (const seg of segments) {
-    let t = seg.start;
+    // Cut-aligned segments start exactly at the scene cut (snapStart), so the
+    // new layout switches at the cut frame instead of the next sample tick.
+    const segStartT = seg.snapStart != null ? seg.snapStart : seg.start;
+    let t = segStartT;
+    let first = true;
     while (t <= seg.end + 0.01 && t < clipEndSec + 0.01) {
       timeline.push({
         videoTimeSec: parseFloat(t.toFixed(2)),
         clipTimeSec:  parseFloat((t - clipStartSec).toFixed(2)),
         faceCount:    seg.decision.mode === "passthrough" ? 0 : 1,
         decision:     seg.decision,
+        // Lock the cut boundary entry so smoothing can't erode it
+        locked:       seg.hardCut === true && first,
       });
+      first = false;
       t += 1.0;
     }
   }
@@ -874,7 +973,11 @@ function smoothTimeline(rawTimeline) {
       const runEnd = j < result.length ? result[j].clipTimeSec : Infinity;
       const runDur = runEnd - result[i].clipTimeSec;
 
-      if (runDur < MIN_HOLD_SECS) {
+      // Never erode a run that contains a locked (scene-cut) entry — the cut
+      // boundary must stay exactly where it is.
+      const runLocked = result.slice(i, j).some(e => e.locked);
+
+      if (runDur < MIN_HOLD_SECS && !runLocked) {
         const prevRun = i > 0             ? result[i - 1].decision : null;
         const nextRun = j < result.length ? result[j].decision     : null;
         let replacement = prevRun || nextRun;
@@ -1034,6 +1137,40 @@ function _buildFocusVariants(baseMode, baseDec) {
   return [];
 }
 
+// ─── Boundary refinement helpers ──────────────────────────────────────────────
+// Lightweight per-sample mode pass (fresh tracker) — used only to locate
+// adjacent-sample mode flips so we can densely re-sample inside soft (no-cut)
+// transition gaps.
+function quickModes(sampleTimes, faceFrames) {
+  const tracker = new FaceTracker();
+  return sampleTimes.map((t) => {
+    const tracked = tracker.update(faceFrames[String(t)] || [], t);
+    return _normMode(classifyFrame(tracked, false).mode);
+  });
+}
+
+// Dense sample times (~0.25s) inside any gap where the mode flips but NO scene
+// cut pins it — lets buildSegmentsFromFrames place the boundary within ~0.25s
+// for soft transitions (e.g. a second person walks into frame). Capped so we
+// never explode the YOLO frame count.
+const REFINE_STEP_SECS = parseFloat(process.env.REFRAMER_REFINE_STEP || "0.25");
+const REFINE_MAX_FRAMES = parseInt(process.env.REFRAMER_REFINE_MAX || "48", 10);
+
+function computeRefineTimes(sampleTimes, faceFrames, sceneCuts) {
+  const modes = quickModes(sampleTimes, faceFrames);
+  const out = [];
+  for (let i = 1; i < sampleTimes.length && out.length < REFINE_MAX_FRAMES; i++) {
+    if (modes[i] === modes[i - 1]) continue;
+    const lo = sampleTimes[i - 1];
+    const hi = sampleTimes[i];
+    if (findCutInGap(sceneCuts, lo, hi) !== null) continue; // cut already pins it
+    for (let t = lo + REFINE_STEP_SECS; t < hi - 0.01 && out.length < REFINE_MAX_FRAMES; t += REFINE_STEP_SECS) {
+      out.push(parseFloat(t.toFixed(2)));
+    }
+  }
+  return out;
+}
+
 // ─── MAIN EXPORT: analyzeClipTimeline ────────────────────────────────────────
 /**
  * Scans a clip segment [startSec, endSec] of videoPath.
@@ -1072,10 +1209,26 @@ async function analyzeClipTimeline(videoPath, startSec, endSec) {
     `${sampleTimes.length} samples`
   );
 
-  const faceFrames = await detectFaces(videoPath, sampleTimes);
+  // Coarse YOLO scan + scene-cut pass (run together).
+  const [faceFrames, sceneCuts] = await Promise.all([
+    detectFaces(videoPath, sampleTimes),
+    detectSceneCuts(videoPath, startSec, endSec),
+  ]);
 
-  // Build segments with per-segment voting
-  let segments = buildSegmentsFromFrames(sampleTimes, faceFrames, startSec);
+  // Refinement: for soft mode-flips with NO scene cut, densely re-sample inside
+  // the gap so the boundary is pinned to ~0.25s instead of the coarse interval.
+  let allTimes  = sampleTimes;
+  let allFrames = faceFrames;
+  const refineTimes = computeRefineTimes(sampleTimes, faceFrames, sceneCuts);
+  if (refineTimes.length) {
+    console.log(`[reframer] refining ${refineTimes.length} frame(s) around soft transitions`);
+    const extra = await detectFaces(videoPath, refineTimes);
+    allFrames = { ...faceFrames, ...extra };
+    allTimes  = [...new Set([...sampleTimes, ...refineTimes])].sort((a, b) => a - b);
+  }
+
+  // Build segments with per-segment voting (boundaries snapped to scene cuts)
+  let segments = buildSegmentsFromFrames(allTimes, allFrames, startSec, sceneCuts);
 
   if (!segments.length) {
     return { timeline: [], srcW: info.w, srcH: info.h, isAlreadyVertical: false };
@@ -1124,8 +1277,11 @@ async function buildFullVideoLayoutMap(videoPath) {
     `${sampleTimes.length} samples @ ${interval}s`
   );
 
-  const faceFrames = await detectFaces(videoPath, sampleTimes);
-  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0);
+  const [faceFrames, sceneCuts] = await Promise.all([
+    detectFaces(videoPath, sampleTimes),
+    detectSceneCuts(videoPath, 0, info.dur),
+  ]);
+  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0, sceneCuts);
   segments         = mergeShortSegments(segments, MIN_SEGMENT_SECS);
 
   const rawTimeline = expandToTimeline(segments, 0, info.dur);

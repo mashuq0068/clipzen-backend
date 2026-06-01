@@ -72,6 +72,11 @@ async function finalizeJobAssets(jobId) {
   }
 
   // ── 2. Clip videos + thumbnails ───────────────────────────
+  // Track whether EVERY clip ended up with a cloud URL. If any video upload
+  // failed (e.g. file too large), we must KEEP the local folder so the clip is
+  // still served from /outputs (the frontend falls back to file_url). Deleting
+  // it would leave that clip with no cloud_url AND no local file = unplayable.
+  let allClipsOnCloud = true;
   try {
     const { rows: clips } = await query(
       "SELECT id, file_path, file_url, cloud_url, thumbnail_url FROM clips WHERE job_id = $1",
@@ -80,7 +85,8 @@ async function finalizeJobAssets(jobId) {
 
     for (const c of clips) {
       // 2a. Video → Cloudinary (only if not already a cloud URL)
-      if (!isCloudUrl(c.cloud_url)) {
+      let cloudUrl = c.cloud_url;
+      if (!isCloudUrl(cloudUrl)) {
         const vpath =
           c.file_path && fs.existsSync(c.file_path)
             ? c.file_path
@@ -88,15 +94,19 @@ async function finalizeJobAssets(jobId) {
         if (vpath && fs.existsSync(vpath)) {
           const url = await uploadToCloudinary(vpath, { resource_type: "video" });
           if (url) {
-            await query("UPDATE clips SET cloud_url = $1 WHERE id = $2", [
-              url,
-              c.id,
-            ]);
+            cloudUrl = url;
+            await query("UPDATE clips SET cloud_url = $1 WHERE id = $2", [url, c.id]);
           }
         }
       }
+      if (!isCloudUrl(cloudUrl)) {
+        allClipsOnCloud = false;
+        console.warn(`   ⚠️  Clip ${c.id} has no cloud URL — keeping its local file`);
+      }
 
-      // 2b. Thumbnail → Cloudinary (only if still a local URL)
+      // 2b. Thumbnail → Cloudinary (only if still a local URL).
+      // Only switch thumbnail_url to cloud if the folder will actually be
+      // deleted; otherwise leave the working local thumbnail in place.
       if (isLocalUrl(c.thumbnail_url)) {
         const tp = localFromUrl(c.thumbnail_url);
         if (tp && fs.existsSync(tp)) {
@@ -112,10 +122,17 @@ async function finalizeJobAssets(jobId) {
     }
   } catch (e) {
     console.warn(`   ⚠️  Clip asset upload failed: ${e.message}`);
+    allClipsOnCloud = false;
   }
 
-  // ── 3. Delete the whole job output folder ─────────────────
+  // ── 3. Delete the job output folder — ONLY if every clip is on Cloudinary ──
   const jobDir = path.join(OUTPUT_BASE, jobId);
+  if (!allClipsOnCloud) {
+    console.warn(
+      `   ⚠️  Keeping local folder outputs/${jobId} — one or more clips aren't on Cloudinary (served locally).`,
+    );
+    return;
+  }
   try {
     if (fs.existsSync(jobDir)) {
       fs.rmSync(jobDir, { recursive: true, force: true });

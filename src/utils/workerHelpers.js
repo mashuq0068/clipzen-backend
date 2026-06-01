@@ -1,6 +1,10 @@
 const { analyzeClipTimeline } = require("../services/speakerReframer");
 
 function extractWordTimingsForStitchedClip(transcriptSegments, clipSegments) {
+  // Returns words with ABSOLUTE source-time timestamps for the clip's segments.
+  // The clip-relative remap (offset-accumulation across stitched segments) is
+  // done downstream by captionBurner.extractWordTimingsForStitchedClip, which
+  // expects absolute input — do NOT pre-remap here or it double-maps to 0 words.
   const allWords = [];
   for (const seg of clipSegments) {
     const segStart = seg.startSec || 0;
