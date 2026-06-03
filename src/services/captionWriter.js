@@ -14,6 +14,7 @@
  */
 
 const { llmWithRetry, isLLMAvailable } = require("./llmProvider");
+const { deriveHashtags } = require("../utils/textLang");
 
 const PLATFORM_INSTRUCTIONS = {
   tiktok:
@@ -30,22 +31,42 @@ const PLATFORM_INSTRUCTIONS = {
     "Twitter/X: One punchy line under 280 chars. Bold or provocative. Max 2 hashtags.",
 };
 
+/**
+ * Algorithmic caption fallback — used when the LLM is unavailable.
+ *
+ * MULTILINGUAL: builds the caption from the clip's own title (already in the
+ * content's language) plus language-neutral elements (emoji, and hashtags
+ * derived from the title's OWN words). No English boilerplate is injected, so
+ * a Hindi/Arabic/Japanese clip gets a Hindi/Arabic/Japanese caption — not a
+ * mix. `#Shorts` is kept only for YouTube as a platform convention, not text.
+ */
 function getFallbackCaption(title, platform) {
-  const clean = (title || "Watch this")
-    .replace(/\.\.\.\$/, "")
-    .replace(/["']/g, "")
-    .trim()
-    .substring(0, 60);
-  return (
-    {
-      tiktok: `${clean} 🔥 #Viral #MustWatch #Shorts`,
-      instagram: `${clean} ✨\n\nSave this for later!\n\n#Reels #ContentCreator #Viral`,
-      linkedin: `${clean} — worth thinking about today.`,
-      facebook: `Have you thought about this?\n\n"${clean}" — drop your thoughts below 👇`,
-      youtube: `${clean} | Watch till the end #Shorts`,
-      twitter: `"${clean}" — this one's different.`,
-    }[platform] || clean
-  );
+  const base =
+    (title || "")
+      .replace(/[.…]+$/u, "")
+      .replace(/["']/g, "")
+      .trim() || "▶";
+
+  // Hashtags from the title's own words → same language as the content.
+  const tagCount = platform === "instagram" ? 6 : platform === "tiktok" ? 4 : 2;
+  const tags = deriveHashtags(base, tagCount).join(" ");
+
+  switch (platform) {
+    case "tiktok":
+      return `${base} 🔥 ${tags}`.trim().slice(0, 150);
+    case "instagram":
+      return `${base} ✨\n\n${tags}`.trim().slice(0, 200);
+    case "linkedin":
+      return base.slice(0, 250); // professional: no emoji, no hashtags
+    case "facebook":
+      return `${base} 👇`.trim().slice(0, 200);
+    case "youtube":
+      return `${base} #Shorts`.trim().slice(0, 90);
+    case "twitter":
+      return `${base} ${deriveHashtags(base, 2).join(" ")}`.trim().slice(0, 280);
+    default:
+      return base.slice(0, 200);
+  }
 }
 
 async function generateCaption(transcript, clipTitle, platform) {

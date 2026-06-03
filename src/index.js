@@ -118,6 +118,7 @@ const clipRoutes = require("./routes/clips");
 const userRoutes = require("./routes/user");
 const analyticsRoutes = require("./routes/analytics");
 const socialRoutes = require("./routes/social");
+const styleRoutes = require("./routes/styles");
 
 // ── Ensure upload/output dirs exist ──────────────────────────
 [process.env.UPLOAD_DIR, process.env.OUTPUT_DIR].forEach((dir) => {
@@ -158,6 +159,7 @@ app.use("/api/clips", clipRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/social", socialRoutes);
+app.use("/api/styles", styleRoutes);
 
 // Compatibility route for older frontend calls; the main contract is /api/social/publish.
 app.post("/api/publish", authMiddleware, async (req, res) => {

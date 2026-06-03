@@ -27,6 +27,7 @@ const path = require("path");
 const fs = require("fs");
 const util = require("util");
 const { llmWithRetry, isLLMAvailable } = require("./llmProvider");
+const { firstSentenceSummary } = require("../utils/textLang");
 
 // Icon system — all matching logic, keyword maps, and overlay building
 const {
@@ -850,12 +851,22 @@ function transcriptText(transcript) {
  * Writes in the SAME language as the content. Returns `fallback` on any failure
  * (LLM unavailable / empty / error) so the title overlay never breaks.
  */
+/**
+ * Algorithmic title fallback (no LLM). Builds a grammatical title from the
+ * clip's OWN first complete sentence — multilingual — instead of a mid-sentence
+ * word cut. Returns `fallback` only if even that yields nothing usable.
+ */
+function algoTitle(text, fallback) {
+  const t = firstSentenceSummary(text, 9);
+  return t && t.length >= 2 ? t.slice(0, 120) : fallback;
+}
+
 async function generateAutoTitle(text, fallback) {
   const clean = (text || "").replace(/\s+/g, " ").trim().slice(0, 1500);
   if (!clean) return fallback;
   try {
     const { isLLMAvailable, llmWithRetry } = require("./llmProvider");
-    if (!(await isLLMAvailable())) return fallback;
+    if (!(await isLLMAvailable())) return algoTitle(clean, fallback);
 
     const prompt = `You are writing the on-screen TITLE for a short-form video. The title must capture the MAIN IDEA of the clip in a way a viewer instantly understands.
 
@@ -887,12 +898,12 @@ Rules:
       .replace(/[.!?]+$/, "")
       .trim();
     if (title && title.length >= 2) return title.slice(0, 120);
-    return fallback;
+    return algoTitle(clean, fallback);
   } catch (err) {
     console.warn(
       `   ⚠️  Auto title failed: ${err?.message?.split("\n")[0]} — using fallback`,
     );
-    return fallback;
+    return algoTitle(clean, fallback);
   }
 }
 

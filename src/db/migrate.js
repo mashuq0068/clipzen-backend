@@ -183,6 +183,21 @@ CREATE TABLE IF NOT EXISTS zernio_profiles (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- User-saved custom caption/title styles (replaces browser localStorage).
+-- kind = 'caption' | 'title'. Limited to 20 per kind per user (enforced in API).
+CREATE TABLE IF NOT EXISTS custom_styles (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('caption', 'title')),
+  name TEXT NOT NULL,
+  config JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_custom_styles_user_kind
+  ON custom_styles(user_id, kind);
+
 CREATE TABLE IF NOT EXISTS social_publish_jobs (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

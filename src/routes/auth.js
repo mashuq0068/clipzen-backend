@@ -29,11 +29,16 @@ function generateRefreshToken(userId) {
 
 // ── COOKIE CONFIG ─────────────────────────────────────────────
 const getCookieOptions = () => {
+  // In production the frontend (e.g. clipzenapp.vercel.app) and the API live on
+  // DIFFERENT domains, so auth cookies are cross-site. The browser only sends
+  // cross-site cookies on XHR when sameSite="none" AND secure=true. With "lax"
+  // the cookie is dropped on every API call → instant logout. Locally we stay
+  // on "lax"+insecure since it's same-site over http.
   const isProduction = process.env.NODE_ENV === "production";
   return {
     httpOnly: true,
     secure: isProduction,
-    sameSite: "lax",
+    sameSite: isProduction ? "none" : "lax",
     path: "/",
   };
 };

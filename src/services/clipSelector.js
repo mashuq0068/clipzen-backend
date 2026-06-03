@@ -13,6 +13,11 @@
  */
 
 const { buildStoryClips, buildStoryClipsSync } = require("./storyEngine");
+const {
+  endsSentence,
+  isQuestion,
+  firstSentenceSummary,
+} = require("../utils/textLang");
 
 const PLATFORM_LIMITS = {
   tiktok:    { sweet: { min: 15, max: 90  } },
@@ -198,7 +203,8 @@ function findCleanEnd(segments, rawEndSec) {
   const nearby = segments.filter(
     (s) => s.end >= rawEndSec - 5 && s.end <= rawEndSec + 20
   );
-  const clean = nearby.find((s) => /[.!?]["']?$/.test(s.text.trim()));
+  // Multilingual: snap to a real sentence end in any script (., 。, ।, ؟, …).
+  const clean = nearby.find((s) => endsSentence(s.text));
   return clean ? clean.end : nearby[0]?.end || rawEndSec;
 }
 
@@ -225,10 +231,19 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
   const idealDur = adaptedIdeal;
 
   const scored = segments.map((seg, i) => {
-    const text      = seg.text.toLowerCase();
-    const hookScore = HOOK_KEYWORDS.reduce(
+    const rawText   = seg.text || "";
+    const text      = rawText.toLowerCase();
+    // English keyword hooks — a BONUS when present (never required).
+    const kwScore   = HOOK_KEYWORDS.reduce(
       (sum, kw) => sum + (text.includes(kw) ? 8 : 0), 0
     );
+    // Language-NEUTRAL hook signals — these work in every language:
+    const qScore    = isQuestion(rawText) ? 10 : 0;        // questions pull viewers in
+    const numScore  = /\p{N}/u.test(rawText) ? 5 : 0;      // concrete numbers / stats
+    const wc        = rawText.trim().split(/\s+/).filter(Boolean).length;
+    const lenScore  = wc >= 8 && wc <= 60 ? 6 : 0;         // substantial, complete thoughts
+    const completeBonus = endsSentence(rawText) ? 4 : 0;   // a finished sentence
+    const hookScore = kwScore + qScore + numScore + lenScore + completeBonus;
     const posRatio = seg.start / totalSecs;
     const posScore =
       posRatio < 0.15 ? 20 : posRatio < 0.4 ? 15 : posRatio < 0.75 ? 10 : 5;
@@ -273,8 +288,8 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
     );
     const transcript = JSON.stringify(clipSegments);
 
-    const firstSegText = clipSegments[0]?.text || "";
-    const title = firstSegText.split(/\s+/).slice(0, 7).join(" ");
+    const clipText = clipSegments.map((s) => s.text).join(" ");
+    const title = firstSentenceSummary(clipText, 8);
     usedRanges.push([finalStart, finalEnd]);
 
     if (stable.wasTrimmed) {
@@ -286,7 +301,7 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
     clips.push({
       startSec:      finalStart,
       endSec:        finalEnd,
-      title:         title.length > 5 ? title + "..." : `Highlight ${clips.length + 1}`,
+      title:         title.length > 5 ? title : `Highlight ${clips.length + 1}`,
       hookScore:     Math.min(88, Math.round(40 + seg.score)),
       transcript,
       contentType:   "general",
@@ -349,8 +364,8 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
         (s) => s.start >= finalStart - 1 && s.end <= finalEnd + 1
       );
       const transcript = JSON.stringify(clipSegments);
-      const firstText  = clipSegments[0]?.text || "";
-      const title      = firstText.split(/\s+/).slice(0, 7).join(" ");
+      const clipText   = clipSegments.map((s) => s.text).join(" ");
+      const title      = firstSentenceSummary(clipText, 8);
 
       const stable = findStableWindow(layoutMap, finalStart, finalEnd);
 
@@ -361,7 +376,7 @@ function selectWithRules(segments, clipCount, clipDuration, platforms, layoutMap
       clips.push({
         startSec:      finalStart,
         endSec:        finalEnd,
-        title:         title.length > 5 ? title + "..." : `Highlight ${clips.length + 1}`,
+        title:         title.length > 5 ? title : `Highlight ${clips.length + 1}`,
         hookScore:     Math.min(75, Math.round(35 + anchor.score)),
         transcript,
         contentType:   "general",

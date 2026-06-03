@@ -26,6 +26,7 @@
  */
 
 const { llmWithRetry, isLLMAvailable } = require("./llmProvider");
+const { endsSentence } = require("../utils/textLang");
 
 // ─────────────────────────────────────────────────────────────
 // CLIP DURATION TARGETS
@@ -107,7 +108,7 @@ function emotionToAudioMood(emotion, topic) {
 // NARRATIVE ROLE DETECTION
 // ─────────────────────────────────────────────────────────────
 const HOOK_PATTERNS = [
-  /\?/,
+  /[?？؟]/,
   /\b(imagine|picture this|what if|did you know)\b/i,
   /\b(never|always|everyone|nobody|the truth|secret|shocking)\b/i,
   /\b(today|right now|by the time)\b/i,
@@ -201,7 +202,7 @@ function snapToSentenceStart(allWords, rawStartSec, maxLookBackSec = 5.0) {
   for (let i = nearIdx; i >= 0; i--) {
     const w = allWords[i];
     if (rawStartSec - w.start > maxLookBackSec) break;
-    if (/[.!?]["']?\s*$/.test(w.word)) {
+    if (endsSentence(w.word)) {
       const next = allWords[i + 1];
       if (next) return next.start;
     }
@@ -222,7 +223,7 @@ function snapToSentenceEnd(allWords, rawEndSec, maxLookForwardSec = 15.0) {
   for (let i = anchorIdx; i < allWords.length; i++) {
     const w = allWords[i];
     if (w.start > rawEndSec + maxLookForwardSec) break;
-    if (/[.!?]["']?\s*$/.test(w.word)) return w.end + 0.05;
+    if (endsSentence(w.word)) return w.end + 0.05;
   }
 
   return allWords[anchorIdx] ? allWords[anchorIdx].end + 0.05 : rawEndSec;
@@ -250,7 +251,7 @@ function parseThoughtBlocks(segments) {
 
     const dur   = cur.endSec - cur.startSec;
     const gap   = next ? next.start - seg.end : 0;
-    const isEnd = /[.!?]["']?\s*$/.test(seg.text.trim());
+    const isEnd = endsSentence(seg.text);
 
     if (i === segments.length - 1) {
       // Last segment — always flush

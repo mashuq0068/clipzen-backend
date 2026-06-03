@@ -16,6 +16,11 @@
  *   MODEL_NAME=nousresearch/hermes-3-llama-3.1-405b:free
  *   OPENROUTER_API_KEY=sk-or-...
  *
+ *   # Groq (fast, free tier — OpenAI-compatible):
+ *   MODEL_PROVIDER=groq
+ *   MODEL_NAME=llama-3.3-70b-versatile
+ *   GROQ_API_KEY=gsk_...
+ *
  * Usage:
  *   const { llm, isLLMAvailable } = require("./llmProvider");
  *   const text = await llm({ prompt: "...", maxTokens: 100 });
@@ -27,10 +32,28 @@ const axios = require("axios");
 // CONFIG — read from .env once at startup
 // ─────────────────────────────────────────────────────────────
 const PROVIDER   = (process.env.MODEL_PROVIDER || "ollama").toLowerCase().trim();
-const MODEL_NAME = process.env.MODEL_NAME || process.env.OLLAMA_MODEL || "llama3.2:3b";
+
+// Per-provider model override → falls back to the shared MODEL_NAME.
+// This lets you switch providers by changing ONLY MODEL_PROVIDER, without
+// having to also edit MODEL_NAME every time.
+const MODEL_BY_PROVIDER = {
+  ollama:     process.env.OLLAMA_MODEL,
+  openrouter: process.env.OPENROUTER_MODEL,
+  groq:       process.env.GROQ_MODEL,
+};
+const MODEL_NAME =
+  MODEL_BY_PROVIDER[PROVIDER] ||
+  process.env.MODEL_NAME ||
+  process.env.OLLAMA_MODEL ||
+  "llama3.2:3b";
+
 const OLLAMA_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OR_KEY     = process.env.OPENROUTER_API_KEY || "";
 const OR_URL     = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
+
+// Groq — OpenAI-compatible API. Free tier is fast and generous (Llama 3.3 70B etc).
+const GROQ_KEY   = process.env.GROQ_API_KEY || "";
+const GROQ_URL   = process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1";
 
 console.log(`[llmProvider] provider=${PROVIDER} model=${MODEL_NAME}`);
 
@@ -44,7 +67,12 @@ async function isLLMAvailable() {
   const now = Date.now();
   if (_avail !== null && now - _lastCheck < 60_000) return _avail;
   try {
-    if (PROVIDER === "openrouter") {
+    if (PROVIDER === "groq") {
+      if (!GROQ_KEY) { _avail = false; _lastCheck = now; return false; }
+      await axios.get(`${GROQ_URL}/models`, {
+        headers: { Authorization: `Bearer ${GROQ_KEY}` }, timeout: 5000,
+      });
+    } else if (PROVIDER === "openrouter") {
       if (!OR_KEY) { _avail = false; _lastCheck = now; return false; }
       await axios.get(`${OR_URL}/models`, {
         headers: { Authorization: `Bearer ${OR_KEY}` }, timeout: 5000,
@@ -110,9 +138,38 @@ async function callOpenRouter({ prompt, maxTokens = 300, temperature = 0.2 }) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// GROQ PROVIDER
+// OpenAI-compatible /chat/completions. Free tier is fast and generous.
+// MODEL_NAME e.g. "llama-3.3-70b-versatile".
+// ─────────────────────────────────────────────────────────────
+async function callGroq({ prompt, maxTokens = 300, temperature = 0.2 }) {
+  if (!GROQ_KEY) throw new Error("GROQ_API_KEY not set in .env");
+  const res = await axios.post(
+    `${GROQ_URL}/chat/completions`,
+    {
+      model: MODEL_NAME,
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: maxTokens,
+      temperature,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${GROQ_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 60_000,
+    },
+  );
+  const text = res.data?.choices?.[0]?.message?.content?.trim();
+  if (!text || text.length < 2) throw new Error("Groq empty response");
+  return text;
+}
+
+// ─────────────────────────────────────────────────────────────
 // MAIN INTERFACE
 // ─────────────────────────────────────────────────────────────
 async function llm(options) {
+  if (PROVIDER === "groq")       return callGroq(options);
   if (PROVIDER === "openrouter") return callOpenRouter(options);
   return callOllama(options);
 }
