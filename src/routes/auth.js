@@ -11,6 +11,17 @@ const {
   sendVerificationEmail,
   sendPasswordResetEmail,
 } = require("../services/email");
+const billing = require("../services/billing");
+
+// Grant the one-time free minutes to a (now verified) account. Idempotent.
+async function grantFreeMinutes(userId) {
+  try {
+    await billing.ensureUserBilling(userId);
+    await billing.grantSignupMinutes(userId);
+  } catch (e) {
+    console.error("Free minutes grant failed:", e.message);
+  }
+}
 
 // ── TOKEN GENERATION ──────────────────────────────────────────
 function generateAccessToken(userId) {
@@ -234,6 +245,7 @@ router.post(
         );
       });
 
+      await grantFreeMinutes(user.id);
       await issueSession(res, user.id);
       return res.json({
         user: { ...userResponse(user), emailVerified: true },
@@ -571,6 +583,7 @@ router.get("/google/callback", async (req, res) => {
       }
     }
 
+    await grantFreeMinutes(user.id);
     await issueSession(res, user.id);
     return res.redirect(`${frontend}/upload`);
   } catch (err) {

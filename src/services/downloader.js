@@ -45,6 +45,15 @@ async function _downloadVideo(url) {
 
   console.log(`⬇️  Downloading: ${url}`);
 
+  // Cap resolution (1080p is plenty for 9:16 shorts and is ~3-4x smaller than
+  // 4K, so long videos download far faster) and pull DASH fragments in parallel
+  // to beat YouTube's per-connection throttling. Both are env-tunable.
+  const maxHeight = Number.parseInt(process.env.MAX_DOWNLOAD_HEIGHT || "1080", 10);
+  const concurrentFragments = Number.parseInt(
+    process.env.YT_CONCURRENT_FRAGMENTS || "8",
+    10,
+  );
+
   const baseArgs = [
     "--cookies", cookiesPath,
     "--no-playlist",
@@ -52,7 +61,18 @@ async function _downloadVideo(url) {
     "--add-header", "Accept-Language:en-US,en;q=0.9",
     "--sleep-interval", "3",
     "--max-sleep-interval", "6",
+    // Parallelise fragment downloads — the single biggest speed-up for long videos.
+    "--concurrent-fragments", String(concurrentFragments),
   ];
+
+  // Optional: pass a player client to dodge YouTube throttled formats,
+  // e.g. YT_PLAYER_CLIENT="web_safari" or "android".
+  if (process.env.YT_PLAYER_CLIENT) {
+    baseArgs.push(
+      "--extractor-args",
+      `youtube:player_client=${process.env.YT_PLAYER_CLIENT}`,
+    );
+  }
 
   // Add proxy if configured
   if (process.env.YT_PROXY) {
@@ -70,10 +90,11 @@ async function _downloadVideo(url) {
   const title = meta.title || "Untitled Video";
   const duration = formatDuration(meta.duration || 0);
 
-  // Download the video
+  // Download the video — capped at maxHeight so we don't pull 4K for a short.
   await execFileAsync("yt-dlp", [
     ...baseArgs,
-    "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4",
+    "-f",
+    `bv*[height<=${maxHeight}][ext=mp4]+ba[ext=m4a]/b[height<=${maxHeight}][ext=mp4]/b[height<=${maxHeight}]/b`,
     "--merge-output-format", "mp4",
     "-o", outputPath,
     url,

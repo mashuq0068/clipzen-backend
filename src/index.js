@@ -11,6 +11,7 @@ const cookieParser = require("cookie-parser");
 const authMiddleware = require("./middleware/auth");
 const crypto = require("crypto");
 const { handleWebhookEvent, queuePublish } = require("./services/socialAccounts");
+const { verifyWebhook: verifyLemonWebhook, handleLemonWebhook } = require("./services/lemonsqueezy");
 
 
 const app = express();
@@ -107,6 +108,27 @@ app.post(
   },
 );
 
+// Lemon Squeezy billing webhook — must read the RAW body to verify the
+// HMAC signature, so it is registered before express.json() (same as Zernio).
+app.post(
+  "/api/billing/webhooks/lemonsqueezy",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const signature = req.get("X-Signature");
+      if (!verifyLemonWebhook(req.body, signature)) {
+        return res.status(400).json({ error: "Invalid Lemon Squeezy signature" });
+      }
+      const payload = JSON.parse(req.body.toString("utf8"));
+      await handleLemonWebhook(payload);
+      res.json({ received: true });
+    } catch (err) {
+      console.error("Lemon Squeezy webhook error:", err);
+      res.status(400).json({ error: "Invalid webhook payload" });
+    }
+  },
+);
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
@@ -119,6 +141,7 @@ const userRoutes = require("./routes/user");
 const analyticsRoutes = require("./routes/analytics");
 const socialRoutes = require("./routes/social");
 const styleRoutes = require("./routes/styles");
+const billingRoutes = require("./routes/billing");
 
 // ── Ensure upload/output dirs exist ──────────────────────────
 [process.env.UPLOAD_DIR, process.env.OUTPUT_DIR].forEach((dir) => {
@@ -160,6 +183,7 @@ app.use("/api/user", userRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/social", socialRoutes);
 app.use("/api/styles", styleRoutes);
+app.use("/api/billing", billingRoutes);
 
 // Compatibility route for older frontend calls; the main contract is /api/social/publish.
 app.post("/api/publish", authMiddleware, async (req, res) => {

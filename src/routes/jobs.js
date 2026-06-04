@@ -5,6 +5,7 @@ const { query } = require("../db/pool");
 const authMiddleware = require("../middleware/auth");
 const upload = require("../middleware/upload");
 const { videoQueue } = require("../queue/videoQueue");
+const { getAvailableMinutes } = require("../services/billing");
 
 // All job routes require auth
 router.use(authMiddleware);
@@ -29,7 +30,7 @@ router.post(
       .isArray({ min: 1 })
       .withMessage("Select at least one platform"),
 
-    body("clipCount").optional().isInt({ min: 1, max: 10 }),
+    body("clipCount").optional().isInt({ min: 1, max: 20 }),
 
     body("clipDuration").optional().isIn(["15s", "30s", "60s", "auto"]),
 
@@ -89,23 +90,18 @@ router.post(
       const platformsArray =
         typeof platforms === "string" ? JSON.parse(platforms) : platforms;
 
-      // plan limits
-      const PLAN_LIMITS = {
-        free: 5,
-        pro: 30,
-        agency: Infinity,
-      };
-
-      const limit = PLAN_LIMITS[req.user.plan] || 5;
-
-      const { rows: usageRows } = await query(
-        `SELECT COUNT(*) FROM jobs
-         WHERE user_id = $1
-         AND created_at > date_trunc('month', NOW())`,
-        [req.user.id],
-      );
-
-      const usedThisMonth = parseInt(usageRows[0].count, 10);
+      // ── Minutes guard ──────────────────────────────────────────
+      // Require some available balance to start. The exact per-job charge
+      // (ceil of the real video length) is reserved in the worker once the
+      // duration is known. 402 → the portal opens the Upgrade modal.
+      const availableMinutes = await getAvailableMinutes(req.user.id);
+      if (availableMinutes <= 0) {
+        return res.status(402).json({
+          error:
+            "You're out of minutes. Upgrade your plan or add credits to keep creating.",
+          code: "INSUFFICIENT_MINUTES",
+        });
+      }
 
       let initialThumbnailUrl = null;
       if (sourceType === "url" && sourceUrl) {

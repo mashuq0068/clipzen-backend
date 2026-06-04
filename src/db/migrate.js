@@ -320,6 +320,110 @@ BEGIN
       FOR EACH ROW EXECUTE FUNCTION update_updated_at();
   END IF;
 END $$;
+
+-- ══════════════════════════════════════════════════════════════
+-- BILLING: minutes-based credits + Lemon Squeezy subscriptions
+-- ══════════════════════════════════════════════════════════════
+
+-- Migrate plan enum: free|pro|agency -> free|starter|pro|advanced
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_plan_check;
+UPDATE users SET plan = 'advanced' WHERE plan = 'agency';
+ALTER TABLE users ALTER COLUMN plan SET DEFAULT 'free';
+ALTER TABLE users ADD CONSTRAINT users_plan_check
+  CHECK (plan IN ('free', 'starter', 'pro', 'advanced'));
+
+-- Minutes reserved/charged for a job (reserve flag + refund amount).
+-- 0 = not charged yet. Makes reserve/refund idempotent across BullMQ retries.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS minutes_charged INT NOT NULL DEFAULT 0;
+
+-- Per-user billing snapshot (fast reads). 1:1 with users.
+--   plan allowance (resets each billing period) + non-expiring credit balance.
+CREATE TABLE IF NOT EXISTS user_billing (
+  user_id               UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  plan                  TEXT NOT NULL DEFAULT 'free'
+                          CHECK (plan IN ('free','starter','pro','advanced')),
+  plan_minutes_included INT NOT NULL DEFAULT 0,   -- per period
+  plan_minutes_used     INT NOT NULL DEFAULT 0,   -- this period
+  credit_minutes        INT NOT NULL DEFAULT 0,   -- non-expiring (free grant + PAYG)
+  period_start          TIMESTAMPTZ,
+  period_end            TIMESTAMPTZ,
+  automation_addon      BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Lemon Squeezy subscription state (one active row per user, history kept).
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ls_subscription_id   TEXT UNIQUE,
+  ls_customer_id       TEXT,
+  ls_order_id          TEXT,
+  ls_variant_id        TEXT,
+  plan                 TEXT,
+  billing_cycle        TEXT,                       -- monthly | yearly
+  status               TEXT,                       -- active|on_trial|past_due|cancelled|expired|paused|unpaid
+  current_period_start TIMESTAMPTZ,
+  current_period_end   TIMESTAMPTZ,
+  renews_at            TIMESTAMPTZ,
+  ends_at              TIMESTAMPTZ,
+  customer_portal_url  TEXT,
+  update_payment_url   TEXT,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id);
+
+-- Append-only usage record (audit + "minutes completed" on the dashboard).
+CREATE TABLE IF NOT EXISTS usage_ledger (
+  id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id     UUID REFERENCES jobs(id) ON DELETE SET NULL,
+  minutes    INT NOT NULL,                         -- + consumed / - refunded
+  kind       TEXT NOT NULL DEFAULT 'job',          -- job | refund
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_id ON usage_ledger(user_id);
+
+-- Money/credit movements (audit + webhook idempotency).
+CREATE TABLE IF NOT EXISTS billing_transactions (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type          TEXT NOT NULL,                     -- signup_grant|subscription|renewal|payg_topup|refund|adjustment
+  ls_event_id   TEXT,
+  minutes_delta INT NOT NULL DEFAULT 0,
+  amount_cents  INT,
+  currency      TEXT,
+  meta          JSONB NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_billing_transactions_user_id ON billing_transactions(user_id);
+-- Exactly one free-minutes grant per user.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_txn_signup_grant
+  ON billing_transactions(user_id) WHERE type = 'signup_grant';
+
+-- Lemon Squeezy webhook dedupe (mirrors zernio_webhook_events).
+CREATE TABLE IF NOT EXISTS lemon_webhook_events (
+  event_id     TEXT PRIMARY KEY,
+  event_name   TEXT NOT NULL,
+  payload      JSONB NOT NULL,
+  processed_at TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_user_billing_updated_at') THEN
+    CREATE TRIGGER trg_user_billing_updated_at
+      BEFORE UPDATE ON user_billing
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_subscriptions_updated_at') THEN
+    CREATE TRIGGER trg_subscriptions_updated_at
+      BEFORE UPDATE ON subscriptions
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+END $$;
 `;
 
 async function migrate() {

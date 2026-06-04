@@ -3,6 +3,7 @@ const router = express.Router();
 const { body, validationResult } = require("express-validator");
 const { query } = require("../db/pool");
 const authMiddleware = require("../middleware/auth");
+const billing = require("../services/billing");
 
 router.use(authMiddleware);
 
@@ -29,8 +30,10 @@ router.get("/me", async (req, res) => {
       [req.user.id]
     );
 
-    const PLAN_LIMITS = { free: 5, pro: 30, agency: null };
     const u = rows[0];
+
+    // Minutes-based billing snapshot (plan allowance + credits).
+    const billingSummary = await billing.getSummary(req.user.id);
 
     res.json({
       user: {
@@ -47,10 +50,14 @@ router.get("/me", async (req, res) => {
           defaultPlatforms: u.default_platforms,
           defaultLanguage: u.default_language,
         },
+        // Minutes usage for the dashboard/billing UI.
         usage: {
+          minutesUsed: billingSummary.planMinutesUsed,
+          minutesIncluded: billingSummary.planMinutesIncluded,
+          availableMinutes: billingSummary.availableMinutes,
           videosUsedThisMonth: parseInt(usageRows[0].count, 10),
-          monthlyLimit: PLAN_LIMITS[u.plan],
         },
+        billing: billingSummary,
       },
     });
   } catch (err) {

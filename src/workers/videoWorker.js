@@ -9,6 +9,7 @@ const IORedis = require("ioredis");
 const { query } = require("../db/pool");
 const { downloadVideo } = require("../services/downloader");
 const { extractJobThumbnail, getVideoDurationSec } = require("../services/thumbnailExtractor");
+const { reserveMinutesForJob, refundJobMinutes } = require("../services/billing");
 const fs = require("fs");
 
 function parseDurationToSeconds(durationStr) {
@@ -146,6 +147,23 @@ const worker = new Worker(
         }
       }
 
+      // ── Billing: reserve minutes now that the real duration is known ──
+      // Charge ceil(minutes of input video). Idempotent per job via
+      // jobs.minutes_charged, so BullMQ retries never double-charge. This runs
+      // after the (cheap) download but before the heavy handlers, so a user who
+      // is short on minutes fails fast without burning compute.
+      const requiredMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
+      const reservation = await reserveMinutesForJob(
+        jobId,
+        userId,
+        requiredMinutes,
+      );
+      if (!reservation.ok) {
+        throw new Error(
+          `Insufficient minutes: this video needs ${requiredMinutes} minute(s) but you have ${reservation.available ?? 0}. Upgrade your plan or add credits.`,
+        );
+      }
+
       console.log(`\nJob Type: ${jobType}`);
 
       // Handlers that return { brollFolder } will populate it for cleanup below
@@ -215,6 +233,8 @@ const worker = new Worker(
         "UPDATE jobs SET status = 'failed', error_message = $1 WHERE id = $2",
         [err.message.substring(0, 500), jobId],
       ).catch(() => {});
+      // Refund any reserved minutes so a failed job doesn't consume balance.
+      await refundJobMinutes(jobId).catch(() => {});
       throw err;
     } finally {
       if (downloadedLocally && videoPath && fs.existsSync(videoPath)) {
