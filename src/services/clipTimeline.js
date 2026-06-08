@@ -7,8 +7,14 @@ const util = require("util");
 
 const execAsync = util.promisify(exec);
 
-// ─── YOUR PYTHON PATH — same as before ───────────────────────────────────────
-const PYTHON = "C:\\Users\\ASUS\\AppData\\Local\\Python\\bin\\python.exe";
+// ─── Python interpreter ──────────────────────────────────────────────────────
+// Override with PYTHON_PATH (set in Docker/Linux). Falls back to the local
+// Windows install for dev, and to "python3" on other platforms.
+const PYTHON =
+  process.env.PYTHON_PATH ||
+  (process.platform === "win32"
+    ? "C:\\Users\\ASUS\\AppData\\Local\\Python\\bin\\python.exe"
+    : "python3");
 const FFPROBE = process.env.FFPROBE_PATH || "ffprobe";
 const SAMPLE_INTERVAL = 1.0;
 

@@ -1,4 +1,4 @@
-node_modules
+**/node_modules
 npm-debug.log*
 Dockerfile*
 docker-compose*.yml
@@ -10,6 +10,11 @@ docker-compose*.yml
 outputs
 uploads
 tmp
+remotion-captions/out
+remotion-captions/uploads
+diagnose_reframer.js
+detect.js
+test.html
 .vscode
 dist
 build

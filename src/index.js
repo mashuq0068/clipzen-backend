@@ -1,5 +1,13 @@
 /* eslint-disable no-undef, no-unused-vars */
 require("dotenv").config();
+// Outbound HTTPS to dual-stack hosts (e.g. Google's OAuth token endpoint) can
+// stall ~21s on this machine: Node 17+ resolves DNS "verbatim" (IPv6 first) and
+// Node 20+ Happy Eyeballs (autoSelectFamily) fails to fall back from the broken
+// IPv6 route to IPv4, so the request hangs until the TCP timeout and then throws
+// with an empty error message. Prefer IPv4 and disable Happy Eyeballs so the
+// working IPv4 address is used directly.
+require("dns").setDefaultResultOrder("ipv4first");
+require("net").setDefaultAutoSelectFamily(false);
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
@@ -28,9 +36,8 @@ const corsOptions = {
       process.env.FRONTEND_URL,
       'http://localhost:8080',           // React dev server
       'http://localhost:8081',           // Alternative port
-      'http://localhost:5173',           // Vite dev server
-      'https://yourdomain.com',          // Production domain
-      'https://api.yourdomain.com',      // API domain if separate
+       "https://portal.clipzen.pro",          // Production portal
+                                        // API domain if separate
     ].filter(Boolean);
     
     if (allowedOrigins.indexOf(origin) !== -1) {

@@ -1,0 +1,16 @@
+# Python ML deps for clipzen-backend (CPU-only).
+# Used by the reframer (YOLOv8-face + OpenCV) and yt-dlp downloads.
+#
+# NOTE: torch/torchvision are installed SEPARATELY in the Dockerfile from the
+# CPU wheel index (https://download.pytorch.org/whl/cpu) so we don't pull the
+# ~5GB CUDA build. ultralytics depends on torch and reuses that CPU install.
+#
+# NOT included (intentional, see Dockerfile / deploy notes):
+#   - pyannote.audio  → speaker diarization, gated behind HUGGINGFACE_TOKEN
+#   - openai-whisper  → local transcription; prod uses Speechmatics (IS_WHISPER=false)
+#     To enable local Whisper instead, add `openai-whisper==20240930` here.
+
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+ultralytics==8.3.40
+yt-dlp==2024.12.13

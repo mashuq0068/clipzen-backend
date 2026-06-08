@@ -1,0 +1,92 @@
+# ── clipzen-backend stack (Postgres on Neon) ────────────────────────────────
+# Build + run on the VM (Oracle ARM or GCP x86 — same commands):
+#   docker compose up -d --build
+#
+# Postgres is managed by Neon (not a container here). Redis runs locally because
+# BullMQ polls constantly and managed Redis free tiers bill per command.
+#
+# Secrets/API keys + the Neon DB_* values come from .env via `env_file`. The
+# `environment:` blocks override only what must differ inside the container net.
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot DB migration against Neon. Runs to completion, then api/worker start.
+  migrate:
+    build: .
+    image: clipzen-backend:latest
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DB_SSL: "true"            # Neon requires TLS
+      PYTHON_PATH: /opt/venv/bin/python
+    command: ["npm", "run", "migrate"]
+    restart: "no"
+
+  api:
+    build: .
+    image: clipzen-backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DB_SSL: "true"           # Neon requires TLS
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      PYTHON_PATH: /opt/venv/bin/python
+      # Prod transcription via Speechmatics (cloud), LLM via Groq — no Whisper/Ollama.
+      IS_WHISPER: "false"
+      BACKEND_URL: ${BACKEND_PUBLIC_URL:-http://localhost:3001}
+    ports:
+      - "3001:3001"
+    volumes:
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+      - tmp:/app/tmp
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    image: clipzen-backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DB_SSL: "true"           # Neon requires TLS
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      PYTHON_PATH: /opt/venv/bin/python
+      IS_WHISPER: "false"
+      # WORKER_CONCURRENCY controls parallel jobs — keep modest on a 4 vCPU VM.
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    command: ["node", "src/workers/videoWorker.js"]
+    volumes:
+      - uploads:/app/uploads        # shared with api so /outputs is servable
+      - outputs:/app/outputs
+      - tmp:/app/tmp
+      - modelcache:/root/.cache     # persist downloaded yolov8-face.pt model
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  redisdata:
+  uploads:
+  outputs:
+  tmp:
+  modelcache:

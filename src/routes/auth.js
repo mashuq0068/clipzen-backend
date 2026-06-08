@@ -524,12 +524,16 @@ router.get("/google/callback", async (req, res) => {
         redirect_uri: googleRedirectUri(),
         grant_type: "authorization_code",
       }).toString(),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 15000,
+      },
     );
 
     const { access_token } = tokenResp.data;
     const userInfo = await axios.get(GOOGLE_USERINFO_URL, {
       headers: { Authorization: `Bearer ${access_token}` },
+      timeout: 15000,
     });
 
     const { sub, email, name, picture, email_verified } = userInfo.data;
@@ -589,7 +593,7 @@ router.get("/google/callback", async (req, res) => {
   } catch (err) {
     console.error(
       "Google OAuth callback error:",
-      err.response?.data || err.message,
+      err.response?.data || err.message || err.code || err,
     );
     return res.redirect(`${frontend}/login?error=oauth_exchange`);
   }

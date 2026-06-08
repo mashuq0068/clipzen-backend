@@ -1,15 +1,24 @@
 /* eslint-disable no-undef */
 const { Pool } = require("pg");
 
+// DB_SSL=true enables TLS (required by managed Postgres like Neon). Neon's
+// serverless DB can also take a few seconds to wake from idle, so the connect
+// timeout is configurable and defaults higher than the old 2s.
+const useSsl = String(process.env.DB_SSL || "").toLowerCase() === "true";
+
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT, 10),
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
+  ssl: useSsl ? { rejectUnauthorized: false } : false,
   max: 20,                  // max pool connections
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: parseInt(
+    process.env.DB_CONNECT_TIMEOUT_MS || "10000",
+    10,
+  ),
 });
 
 pool.on("connect", () => {

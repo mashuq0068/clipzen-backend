@@ -304,14 +304,25 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
 
   for (let i = 0; i < segments.length; i++) {
     const seg  = segments[i];
-    const dur  = Math.max(0.5, seg.endT - seg.startT);
     const mode = seg.decision.mode;
 
+    // CAPTION-SYNC FIX: trim by shared START:END boundaries (not start+duration).
+    // Captions are timed to the continuous clip timeline, so the concatenated
+    // video MUST reproduce that timeline exactly. With `duration=`, each segment
+    // rounds to whole frames independently → the rounding errors accumulate over
+    // many segments and the video drifts ahead/behind the captions. Using
+    // `end=` with segment i's end == segment i+1's start makes the rounding
+    // consistent at every boundary, so the pieces tile gaplessly and the total
+    // duration stays exact. We also drop the old Math.max(0.5,…) floor, which
+    // inflated short (e.g. hard-cut) segments and shifted everything after them.
+    const startT = seg.startT;
+    const endT   = Math.max(seg.startT + 0.04, seg.endT); // ≥ ~1 frame, never inflate
+
     filterParts.push(
-      `[0:v]trim=start=${seg.startT.toFixed(3)}:duration=${dur.toFixed(3)},setpts=PTS-STARTPTS[seg${i}v_raw]`
+      `[0:v]trim=start=${startT.toFixed(3)}:end=${endT.toFixed(3)},setpts=PTS-STARTPTS[seg${i}v_raw]`
     );
     filterParts.push(
-      `[0:a]atrim=start=${seg.startT.toFixed(3)}:duration=${dur.toFixed(3)},asetpts=PTS-STARTPTS[seg${i}a_raw]`
+      `[0:a]atrim=start=${startT.toFixed(3)}:end=${endT.toFixed(3)},asetpts=PTS-STARTPTS[seg${i}a_raw]`
     );
 
     if (_isFaceMode(mode)) {
