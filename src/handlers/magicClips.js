@@ -9,7 +9,7 @@ const { generateAllCaptions } = require("../services/captionWriter");
 const { burnCaptions } = require("../services/captionBurner");
 const { buildBrollSegments } = require("../services/brollEngine");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
-const { uploadToCloudinary } = require("../services/cloudinary");
+const { uploadToStorage } = require("../services/storage");
 const fs = require("fs");
 const pathModule = require("path");
 
@@ -241,7 +241,7 @@ async function handleMagicClips(dbJob, videoPath, jobId, userId, helpers) {
 
     let cloudUrl = null;
     try {
-      cloudUrl = await uploadToCloudinary(filePath);
+      cloudUrl = await uploadToStorage(filePath, { resource_type: "video" });
     } catch (err) {
       console.error(`  ⚠️ Cloudinary upload failed for clip ${i + 1}:`, err);
     }

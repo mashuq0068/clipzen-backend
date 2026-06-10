@@ -36,7 +36,7 @@ const corsOptions = {
       process.env.FRONTEND_URL,
       'http://localhost:8080',           // React dev server
       'http://localhost:8081',           // Alternative port
-       "https://portal.clipzen.pro",          // Production portal
+      "https://portal.clipzen.pro",          // Production portal
                                         // API domain if separate
     ].filter(Boolean);
     

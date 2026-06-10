@@ -15,7 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { query } = require("../db/pool");
-const { uploadToCloudinary, isCloudinaryConfigured } = require("./cloudinary");
+const { uploadToStorage, isStorageConfigured } = require("./storage");
 
 const OUTPUT_BASE =
   process.env.OUTPUT_DIR || path.resolve(__dirname, "../../outputs");
@@ -30,7 +30,7 @@ function localFromUrl(url) {
 }
 
 async function uploadImage(localPath) {
-  return uploadToCloudinary(localPath, {
+  return uploadToStorage(localPath, {
     resource_type: "image",
     folder: "clipzen/thumbnails",
   });
@@ -41,9 +41,9 @@ async function uploadImage(localPath) {
  * local job folder. No-op (keeps local files) when Cloudinary isn't configured.
  */
 async function finalizeJobAssets(jobId) {
-  if (!isCloudinaryConfigured) {
+  if (!isStorageConfigured) {
     console.log(
-      "   ☁️  Cloudinary not configured — keeping local files (no cleanup)",
+      "   ☁️  No cloud storage configured (R2/Cloudinary) — keeping local files (no cleanup)",
     );
     return;
   }
@@ -92,7 +92,7 @@ async function finalizeJobAssets(jobId) {
             ? c.file_path
             : localFromUrl(c.file_url);
         if (vpath && fs.existsSync(vpath)) {
-          const url = await uploadToCloudinary(vpath, { resource_type: "video" });
+          const url = await uploadToStorage(vpath, { resource_type: "video" });
           if (url) {
             cloudUrl = url;
             await query("UPDATE clips SET cloud_url = $1 WHERE id = $2", [url, c.id]);

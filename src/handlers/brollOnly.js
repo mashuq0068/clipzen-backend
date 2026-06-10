@@ -3,7 +3,7 @@ const { transcribeVideo, extractWordTimingsForClip } = require("../services/tran
 const { formatTime } = require("../services/clipCutter");
 const { buildBrollSegments } = require("../services/brollEngine");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
-const { uploadToCloudinary } = require("../services/cloudinary");
+const { uploadToStorage } = require("../services/storage");
 const pathModule = require("path");
 const fs = require("fs");
 const { promisify } = require("util");
@@ -91,7 +91,7 @@ async function handleBrollOnly(dbJob, videoPath, jobId, userId, helpers) {
 
   let cloudUrl = null;
   try {
-    cloudUrl = await uploadToCloudinary(finalPath);
+    cloudUrl = await uploadToStorage(finalPath, { resource_type: "video" });
   } catch (err) {
     console.error("  ⚠️ Cloudinary upload failed:", err);
   }

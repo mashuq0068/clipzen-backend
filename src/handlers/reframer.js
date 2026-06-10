@@ -1,7 +1,7 @@
 const { query } = require("../db/pool");
 const { cutClip, formatTime } = require("../services/clipCutter");
 const { extractClipThumbnail } = require("../services/thumbnailExtractor");
-const { uploadToCloudinary } = require("../services/cloudinary");
+const { uploadToStorage } = require("../services/storage");
 
 const { promisify } = require("util");
 const { exec } = require("child_process");
@@ -84,7 +84,7 @@ async function handleReframer(
   // ─────────────────────────────
   let cloudUrl = null;
   try {
-    cloudUrl = await uploadToCloudinary(cut.filePath);
+    cloudUrl = await uploadToStorage(cut.filePath, { resource_type: "video" });
   } catch (err) {
     console.error("  ⚠️ Cloudinary upload failed:", err);
   }

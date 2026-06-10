@@ -2,7 +2,7 @@ const { query } = require("../db/pool");
 const { transcribeVideo, extractWordTimingsForClip } = require("../services/transcriber");
 const { burnCaptions } = require("../services/captionBurner");
 const { formatTime } = require("../services/clipCutter");
-const { uploadToCloudinary } = require("../services/cloudinary");
+const { uploadToStorage } = require("../services/storage");
 const pathModule = require("path");
 const fs = require("fs");
 
@@ -78,7 +78,7 @@ async function handleAddCaptions(dbJob, videoPath, jobId, userId) {
 
   let cloudUrl = null;
   try {
-    cloudUrl = await uploadToCloudinary(captionedPath);
+    cloudUrl = await uploadToStorage(captionedPath, { resource_type: "video" });
   } catch (err) {
     console.error("  ⚠️ Cloudinary upload failed:", err);
   }

@@ -254,6 +254,18 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
     }
   }
 
+  // CRITICAL CAPTION-SYNC FIX: the per-segment concat MUST cover the entire clip
+  // [0, clipDuration]. The reframe timeline sometimes doesn't start at exactly 0
+  // (or end exactly at clipDuration) — when that happens the concat trims away
+  // the clip's head/tail, so the rendered video is shorter than the clip while
+  // the audio + captions are still timed to the FULL clip → captions are shifted
+  // (out of sync) from the very first second. Clamp the outer boundaries so the
+  // output always equals the full clip duration and stays frame-aligned to it.
+  if (segments.length) {
+    segments[0].startT = 0;
+    segments[segments.length - 1].endT = clipDuration;
+  }
+
   console.log(
     `[clipCutter] collapsed ${rawSegments.length} raw entries → ${segments.length} segments`
   );

@@ -3,6 +3,7 @@ import {
   AbsoluteFill,
   Video,
   useCurrentFrame,
+  useVideoConfig,
   interpolate,
   spring,
   Easing,
@@ -179,37 +180,54 @@ function softGlow(color: string | undefined, px: number): string {
 export function getLayoutPosition(
   layout: string,
   style?: StyleConfig,
+  dims?: { width: number; height: number },
 ): React.CSSProperties {
+  // Base anchors are PERCENTAGES of the composition (not px), so a caption sits
+  // in the same relative spot on any video size — vertical 9:16 clips AND the
+  // original-size add-captions output alike. Percentages are calibrated to the
+  // 1080×1920 vertical layout so that output is visually unchanged:
+  //   top 60px→3.1% · bottom 80px→4.2% · bottom 280px→14.6% (of 1920 height)
+  //   side 20px→1.9% · side 40px→3.7% (of 1080 width)
   let baseLayout: React.CSSProperties = {};
   switch (layout) {
     case "top-left":
-      baseLayout = { top: 60, left: 20, right: 20 };
+      baseLayout = { top: "3.1%", left: "1.9%", right: "1.9%" };
       break;
     case "center":
       baseLayout = {
         top: "50%",
-        left: 20,
-        right: 20,
+        left: "1.9%",
+        right: "1.9%",
         transform: "translateY(-50%)",
       };
       break;
     case "bottom-right":
-      baseLayout = { bottom: 80, right: 20, left: "auto", maxWidth: "75%" };
+      baseLayout = { bottom: "4.2%", right: "1.9%", left: "auto", maxWidth: "75%" };
       break;
     case "bottom-left":
-      baseLayout = { bottom: 80, left: 20, right: "auto", maxWidth: "80%" };
+      baseLayout = { bottom: "4.2%", left: "1.9%", right: "auto", maxWidth: "80%" };
       break;
     case "bottom-center":
     default:
-      baseLayout = { bottom: 280, left: 40, right: 40 };
+      baseLayout = { bottom: "14.6%", left: "3.7%", right: "3.7%" };
       break;
   }
 
   if (style) {
     if (style.offsetX !== undefined || style.offsetY !== undefined) {
       const merged = { ...baseLayout };
-      const tx = style.offsetX || 0;
-      const ty = style.offsetY || 0;
+
+      // offsetX / offsetY are PERCENTAGES of the composition (screen) size,
+      // NOT pixels. This keeps caption placement consistent no matter the
+      // video's pixel size — critical for add-captions, where we keep the
+      // ORIGINAL (uncropped) video, so its height varies. A fixed px offset
+      // would land near the top on a short video and barely move on a tall one.
+      //   e.g. offsetY: -5  → move up 5% of the screen height
+      //        offsetX:  3  → move right 3% of the screen width
+      const W = dims?.width ?? 1080;
+      const H = dims?.height ?? 1920;
+      const tx = ((style.offsetX || 0) / 100) * W;
+      const ty = ((style.offsetY || 0) / 100) * H;
 
       if (tx !== 0 || ty !== 0) {
         const baseTransform = merged.transform ? `${merged.transform} ` : "";
@@ -1499,6 +1517,7 @@ export const CaptionedVideo: React.FC<Props> = ({
   fitMode = "cover",
 }) => {
   const frame = useCurrentFrame();
+  const { width: compWidth, height: compHeight } = useVideoConfig();
   const t = frame / fps;
 
   if (t > clipDurationSecs) return null;
@@ -1578,6 +1597,7 @@ export const CaptionedVideo: React.FC<Props> = ({
   const layoutStyle = getLayoutPosition(
     effectiveLayout,
     isInSplitMoment ? undefined : style,
+    { width: compWidth, height: compHeight },
   );
 
   // Apply dynamic offsets on top of base layout
