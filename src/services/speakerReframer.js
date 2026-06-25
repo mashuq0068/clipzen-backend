@@ -147,6 +147,11 @@ try:
         fatal(f"cv2 import error: {e}", traceback.format_exc())
 
     try:
+        import numpy as np
+    except Exception:
+        np = None
+
+    try:
         from ultralytics import YOLO
         import logging
         logging.getLogger("ultralytics").setLevel(logging.ERROR)
@@ -170,6 +175,54 @@ try:
 
     model = YOLO(MODEL_PATH)
 
+    def detect_grid(frame):
+        # VIDEO-CALL GRID vs a real continuous shot — from PIXELS, no faces
+        # needed (YOLO routinely misses the 2nd person in a tile).
+        #
+        # The discriminator is TWO things TOGETHER:
+        #   1) a strong, full-height vertical divider (tile border), AND
+        #   2) the two halves are DIFFERENT scenes.
+        #
+        # A grid is two INDEPENDENT feeds → different rooms/colours each side.
+        # A real one-camera podcast may have vertical edges (bookshelf, mics) but
+        # BOTH halves share the same room/lighting/table → the halves look ALIKE.
+        # That half-(dis)similarity is what tells them apart. Returns
+        # (is_grid, seam_ratio, continuity, dissim) for logging/tuning.
+        if np is None:
+            return (False, 0.0, 0.0, 0.0)
+        try:
+            small  = cv2.resize(frame, (240, 135))
+            gray   = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            sw     = small.shape[1]
+            agx    = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+            colmag = agx.sum(axis=0)
+            mean_col = float(colmag.mean()) + 1e-6
+            lo  = int(0.25 * sw)
+            hi  = int(0.75 * sw)
+            region     = colmag[lo:hi]
+            peak_idx   = lo + int(np.argmax(region))
+            peak_val   = float(colmag[peak_idx])
+            seam_ratio = peak_val / mean_col
+            col        = agx[:, peak_idx]
+            thr        = float(np.percentile(agx, 75)) + 1e-6
+            continuity = float((col > thr).mean())   # fraction of rows that are edges
+            # Half dissimilarity via HSV histogram correlation (1.0 = identical
+            # scenes → same room → NOT grid; low corr → different rooms → grid).
+            hsv   = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            left  = hsv[:, :peak_idx]
+            right = hsv[:, peak_idx:]
+            dissim = 0.0
+            if left.size and right.size:
+                hl = cv2.calcHist([left],  [0, 1], None, [16, 16], [0, 180, 0, 256])
+                hr = cv2.calcHist([right], [0, 1], None, [16, 16], [0, 180, 0, 256])
+                cv2.normalize(hl, hl); cv2.normalize(hr, hr)
+                corr   = float(cv2.compareHist(hl, hr, cv2.HISTCMP_CORREL))
+                dissim = max(0.0, 1.0 - corr)
+            is_grid = (seam_ratio > 2.0 and continuity > 0.70 and dissim > 0.45)
+            return (bool(is_grid), seam_ratio, continuity, dissim)
+        except Exception:
+            return (False, 0.0, 0.0, 0.0)
+
     # Use FFMPEG backend + MSEC seeking — avoids Windows frame-seek crash
     cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
     if not cap.isOpened():
@@ -178,6 +231,8 @@ try:
         fatal(f"VideoCapture could not open: {video_path}")
 
     out = {}
+    grids = {}
+    _dbg = {"sr": 0.0, "cont": 0.0, "dis": 0.0, "n": 0}
 
     for t in sample_times:
         # MSEC-based seeking — stable on Windows, avoids CAP_PROP_POS_FRAMES crash
@@ -185,7 +240,17 @@ try:
         ok, frame = cap.read()
         if not ok:
             out[str(t)] = []
+            grids[str(t)] = False
             continue
+
+        # Grid detection runs on the frame itself (no faces needed).
+        g_flag, g_sr, g_cont, g_dis = detect_grid(frame)
+        grids[str(t)] = g_flag
+        if g_flag:
+            _dbg["n"] += 1
+        _dbg["sr"]   = max(_dbg["sr"], g_sr)
+        _dbg["cont"] = max(_dbg["cont"], g_cont)
+        _dbg["dis"]  = max(_dbg["dis"], g_dis)
 
         h, w    = frame.shape[:2]
         results = model(frame, conf=0.25, imgsz=640, verbose=False)[0]
@@ -240,7 +305,11 @@ try:
         out[str(t)] = deduped[:6]
 
     cap.release()
-    print(json.dumps({"ok": True, "frames": out}))
+    log_debug(
+        f"grid scan: {_dbg['n']}/{len(sample_times)} grid frame(s) | "
+        f"max seam_ratio={_dbg['sr']:.2f} cont={_dbg['cont']:.2f} dissim={_dbg['dis']:.3f}"
+    )
+    print(json.dumps({"ok": True, "frames": out, "grids": grids}))
     sys.stdout.flush()
 
 except Exception as e:
@@ -250,7 +319,7 @@ except Exception as e:
 // ─── Script path helper ───────────────────────────────────────────────────────
 function getFaceScriptPath() {
   ensureTmp();
-  const p = path.join(TMP_DIR, "_reframe_faces_v60.py");
+  const p = path.join(TMP_DIR, "_reframe_faces_v61.py");
   if (!fs.existsSync(p) || fs.readFileSync(p, "utf8") !== FACE_SCRIPT) {
     fs.writeFileSync(p, FACE_SCRIPT);
   }
@@ -399,7 +468,7 @@ async function _runScript(scriptPath, videoPath, payload) {
 
 // ─── YOLO runner with chunking + retry ────────────────────────────────────────
 async function detectFaces(videoPath, sampleTimes) {
-  if (!sampleTimes.length) return {};
+  if (!sampleTimes.length) return { frames: {}, grids: {} };
   const script = getFaceScriptPath();
   const chunks = [];
   for (let i = 0; i < sampleTimes.length; i += MAX_FRAMES_PER_CHUNK) {
@@ -408,6 +477,7 @@ async function detectFaces(videoPath, sampleTimes) {
   console.log(`[reframer/yolo] ${sampleTimes.length} frames → ${chunks.length} chunk(s)`);
 
   const merged = {};
+  const mergedGrids = {};
   for (let ci = 0; ci < chunks.length; ci++) {
     const chunk  = chunks[ci];
     let   result = await _runScript(script, videoPath, { sample_times: chunk });
@@ -418,17 +488,22 @@ async function detectFaces(videoPath, sampleTimes) {
       const rA   = await _runScript(script, videoPath, { sample_times: chunk.slice(0, half) });
       const rB   = await _runScript(script, videoPath, { sample_times: chunk.slice(half) });
       if (rA || rB) {
-        result = { ok: true, frames: { ...(rA?.frames || {}), ...(rB?.frames || {}) } };
+        result = {
+          ok: true,
+          frames: { ...(rA?.frames || {}), ...(rB?.frames || {}) },
+          grids:  { ...(rA?.grids  || {}), ...(rB?.grids  || {}) },
+        };
       }
     }
 
     if (!result) {
-      for (const t of chunk) merged[String(t)] = [];
+      for (const t of chunk) { merged[String(t)] = []; mergedGrids[String(t)] = false; }
     } else {
       Object.assign(merged, result.frames);
+      Object.assign(mergedGrids, result.grids || {});
     }
   }
-  return merged;
+  return { frames: merged, grids: mergedGrids };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -479,6 +554,10 @@ function _normMode(mode) {
 const GRID_MIN_CY_DIFF_2FACE = 0.20;  // 2-face grid: vertical offset ≥ this → grid
                                         // (top tile cy≈0.25, bottom tile cy≈0.75 → diff≈0.50)
                                         // podcast: both at table → diff typically < 0.10
+
+// Master switch for the new pixel-seam grid detection + "when in doubt → blur"
+// behaviour. Set REFRAMER_GRID_DETECT=off to fall back to 100% original logic.
+const GRID_DETECT = (process.env.REFRAMER_GRID_DETECT || "on").toLowerCase() !== "off";
 
 function isGridLayout(faces) {
   if (!faces.length) return false;
@@ -601,7 +680,8 @@ function classifyFrame(trackedFaces, sceneChange = false) {
     };
   }
 
-  // 2 or more faces — check grid first (works for both 2 and 3+)
+  // Geometry grid fallback (vertical-offset grids, 3+ tiles). The pixel-seam
+  // grid was already handled at the top of this function.
   if (isGridLayout(sorted)) {
     return { mode: "blur_overlay", sceneChange };
   }
@@ -630,7 +710,9 @@ function classifyFrame(trackedFaces, sceneChange = false) {
     };
   }
 
-  // Can't form a clean split → focus dominant speaker
+  // Can't form a clean split → focus dominant speaker (original behaviour).
+  // (Grids are handled at the CLIP level now, so we do NOT blur here — that
+  // would wrongly blur ambiguous frames of a real, non-grid podcast.)
   const primary   = sorted[0];
   const secondary = sorted[1];
   return {
@@ -703,16 +785,113 @@ class FaceTracker {
  *
  * Returns: [{ start, end, frames: [{t, decision}] }]
  */
-function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec, sceneCuts = []) {
+// Cluster detected face x-positions into stable "people" slots, used for the
+// grid variety crops (so we cut to a REAL person, not the empty centre gap).
+// Groups faces within 0.12 cx of each other and averages; needs ≥2 hits to
+// count (ignores one-off mis-detections). Returns up to 4 people, left→right.
+function _clusterPeople(positions) {
+  if (!positions || !positions.length) return [];
+  const sorted = [...positions].sort((a, b) => a.cx - b.cx);
+  const clusters = [];
+  for (const p of sorted) {
+    const last = clusters[clusters.length - 1];
+    if (last && Math.abs(p.cx - last.cxMean) < 0.12) {
+      last.sumCx += p.cx; last.sumCy += p.cy; last.n++;
+      last.cxMean = last.sumCx / last.n;
+    } else {
+      clusters.push({ sumCx: p.cx, sumCy: p.cy, n: 1, cxMean: p.cx });
+    }
+  }
+  return clusters
+    .filter(c => c.n >= 2)
+    .map(c => ({ cx: c.sumCx / c.n, cy: c.sumCy / c.n }))
+    .slice(0, 4);
+}
+
+function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec, sceneCuts = [], gridFrames = {}) {
   const tracker = new FaceTracker();
 
   // 1. Classify every sampled frame
+  let _gridFrameCount = 0;
+  const _gridPositions = [];
+  // Strict split-clip detection: track, per frame, the presence of a LARGE face
+  // on each side. Small / transient / scattered faces (football, travel, crowds,
+  // b-roll, scenery) must NEVER trigger split — only a real side-by-side podcast
+  // with two people parked left & right for most of the clip does.
+  const SPLIT_FACE_MIN_AREA = 0.010;
+  let _leftFrames = 0, _rightFrames = 0;
+  const _leftCx = [], _leftCy = [], _rightCx = [], _rightCy = [];
   const classified = sampleTimes.map(t => {
     const rawFaces = faceFrames[String(t)] || [];
+    // Grid comes from the FRAME pixels (tile divider) — independent of how many
+    // faces YOLO found, because it routinely misses the 2nd person in a tile.
+    const isGrid   = gridFrames[String(t)] === true;
+    if (isGrid) {
+      _gridFrameCount++;
+      for (const f of rawFaces) _gridPositions.push({ cx: f.cx, cy: f.cy });
+    }
+    const _sig = rawFaces.filter(f => (f.area ?? 0) >= SPLIT_FACE_MIN_AREA);
+    const _lf  = _sig.filter(f => f.cx >= 0.10 && f.cx <= 0.42);
+    const _rf  = _sig.filter(f => f.cx >= 0.58 && f.cx <= 0.90);
+    if (_lf.length) { _leftFrames++;  for (const f of _lf) { _leftCx.push(f.cx);  _leftCy.push(f.cy); } }
+    if (_rf.length) { _rightFrames++; for (const f of _rf) { _rightCx.push(f.cx); _rightCy.push(f.cy); } }
     const tracked  = tracker.update(rawFaces, t);
     const decision = classifyFrame(tracked, false);
     return { t, decision, normMode: _normMode(decision.mode) };
   });
+
+  // GRID is decided at the CLIP level, not per-frame: only when a clear MAJORITY
+  // of frames are grid do we treat the whole clip as a video-call grid. This way
+  // a few stray false-positive seams (e.g. a bookshelf in a real podcast) can't
+  // flip it — a real continuous podcast keeps its split.
+  const isGridClip = GRID_DETECT && _gridFrameCount >= 2 &&
+                     _gridFrameCount >= 0.50 * classified.length;
+  const gridPeople = isGridClip ? _clusterPeople(_gridPositions) : [];
+  if (_gridFrameCount > 0) {
+    console.log(
+      `[reframer/grid] ${_gridFrameCount}/${classified.length} grid frame(s)` +
+      (isGridClip
+        ? ` → GRID CLIP (blur base, never passthrough, ${gridPeople.length} people)`
+        : ` (below grid-clip threshold — treated normally)`)
+    );
+  }
+
+  // SPLIT CLIP detection (side-by-side podcast) — STRICT, so general footage
+  // (football, travel, b-roll, scenery, single-subject) is NEVER split.
+  // A genuine side-by-side podcast has TWO LARGE faces, one parked on the left
+  // and one on the right, BOTH present for most of the clip, each at a STABLE
+  // horizontal position. Only then do we treat passthrough as split (so a wide
+  // 2-shot never shows the empty centre). Everything else passes through normally.
+  let isSplitClip = false;
+  let splitDecision = null;
+  if (!isGridClip) {
+    const N    = Math.max(1, classified.length);
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    const std  = (a) => {
+      if (a.length < 2) return 1;
+      const m = mean(a);
+      return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length);
+    };
+    const lPresent = _leftFrames / N;
+    const rPresent = _rightFrames / N;
+    const leftStable  = _leftFrames  >= 2 && lPresent >= 0.30 && std(_leftCx)  < 0.08;
+    const rightStable = _rightFrames >= 2 && rPresent >= 0.30 && std(_rightCx) < 0.08;
+    if (leftStable && rightStable) {
+      const lcx = mean(_leftCx), lcy = mean(_leftCy);
+      const rcx = mean(_rightCx), rcy = mean(_rightCy);
+      isSplitClip   = true;
+      splitDecision = {
+        mode: "split",
+        leftCxNorm: lcx, leftCyNorm: lcy,
+        rightCxNorm: rcx, rightCyNorm: rcy,
+        isWideLayout: (rcx - lcx) >= 0.50,
+      };
+      console.log(
+        `[reframer/split] SPLIT CLIP — L present ${(lPresent * 100).toFixed(0)}% R ${(rPresent * 100).toFixed(0)}% ` +
+        `(Lcx=${lcx.toFixed(2)} Rcx=${rcx.toFixed(2)}) → passthrough becomes split`
+      );
+    }
+  }
 
   if (!classified.length) return [];
 
@@ -804,7 +983,13 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec, sceneCut
       arr.length ? arr.reduce((s, p) => s + p[key], 0) / arr.length : null;
 
     let decision;
-    if (winMode === "split" && splitPos.length) {
+    if (isGridClip) {
+      // Confirmed video-call GRID clip → every segment is blur (occasionally a
+      // real person via variety). Never split/face/passthrough here. This is
+      // ONLY reached when the majority of frames were grid, so a real podcast
+      // (no grid majority) never lands here and keeps its normal split.
+      decision = { mode: "blur_overlay", people: gridPeople };
+    } else if (winMode === "split" && splitPos.length) {
       decision = {
         mode:         "split",
         leftCxNorm:   avg(splitPos, "lcx") ?? 0.25,
@@ -820,9 +1005,11 @@ function buildSegmentsFromFrames(sampleTimes, faceFrames, clipStartSec, sceneCut
         faceCyNorm: avg(facePos, "cy") ?? 0.4,
       };
     } else if (winMode === "blur_overlay") {
-      decision = { mode: "blur_overlay" };
+      decision = { mode: "blur_overlay", people: gridPeople };
     } else {
-      decision = { mode: "passthrough" };
+      // passthrough — but in a 2-person SPLIT clip, never show the empty middle:
+      // render both people split instead, using the clip's L/R face positions.
+      decision = isSplitClip ? { ...splitDecision } : { mode: "passthrough" };
     }
 
     const startT = frames[0].t;
@@ -1128,11 +1315,24 @@ function _buildFocusVariants(baseMode, baseDec) {
     ];
   }
   if (baseMode === "blur_overlay") {
-    return [
-      { mode: "face_left",   faceCxNorm: 0.25, faceCyNorm: 0.38 },
-      { mode: "face_right",  faceCxNorm: 0.75, faceCyNorm: 0.38 },
-      { mode: "face",        faceCxNorm: 0.50, faceCyNorm: 0.38 },
-    ];
+    if (!GRID_DETECT) {
+      return [
+        { mode: "face_left",   faceCxNorm: 0.25, faceCyNorm: 0.38 },
+        { mode: "face_right",  faceCxNorm: 0.75, faceCyNorm: 0.38 },
+        { mode: "face",        faceCxNorm: 0.50, faceCyNorm: 0.38 },
+      ];
+    }
+    // Grid → mostly blur, but occasionally cut to a REAL person for variety
+    // (sometimes left, sometimes right, …). Crop to each detected person's
+    // ACTUAL position — never the old hardcoded centre gap. If we don't
+    // confidently know ≥2 people, we stay on blur ("not sure → blur").
+    const people = Array.isArray(baseDec.people) ? baseDec.people : [];
+    if (people.length < 2) return [];
+    return people.map(p => ({
+      mode:       p.cx < 0.5 ? "face_left" : "face_right",
+      faceCxNorm: p.cx,
+      faceCyNorm: p.cy ?? 0.4,
+    }));
   }
   return [];
 }
@@ -1210,25 +1410,28 @@ async function analyzeClipTimeline(videoPath, startSec, endSec) {
   );
 
   // Coarse YOLO scan + scene-cut pass (run together).
-  const [faceFrames, sceneCuts] = await Promise.all([
+  const [faceData, sceneCuts] = await Promise.all([
     detectFaces(videoPath, sampleTimes),
     detectSceneCuts(videoPath, startSec, endSec),
   ]);
+  const faceFrames = faceData.frames;
 
   // Refinement: for soft mode-flips with NO scene cut, densely re-sample inside
   // the gap so the boundary is pinned to ~0.25s instead of the coarse interval.
   let allTimes  = sampleTimes;
   let allFrames = faceFrames;
+  let allGrids  = faceData.grids;
   const refineTimes = computeRefineTimes(sampleTimes, faceFrames, sceneCuts);
   if (refineTimes.length) {
     console.log(`[reframer] refining ${refineTimes.length} frame(s) around soft transitions`);
     const extra = await detectFaces(videoPath, refineTimes);
-    allFrames = { ...faceFrames, ...extra };
+    allFrames = { ...faceFrames, ...extra.frames };
+    allGrids  = { ...allGrids, ...extra.grids };
     allTimes  = [...new Set([...sampleTimes, ...refineTimes])].sort((a, b) => a - b);
   }
 
   // Build segments with per-segment voting (boundaries snapped to scene cuts)
-  let segments = buildSegmentsFromFrames(allTimes, allFrames, startSec, sceneCuts);
+  let segments = buildSegmentsFromFrames(allTimes, allFrames, startSec, sceneCuts, allGrids);
 
   if (!segments.length) {
     return { timeline: [], srcW: info.w, srcH: info.h, isAlreadyVertical: false };
@@ -1277,11 +1480,11 @@ async function buildFullVideoLayoutMap(videoPath) {
     `${sampleTimes.length} samples @ ${interval}s`
   );
 
-  const [faceFrames, sceneCuts] = await Promise.all([
+  const [faceData, sceneCuts] = await Promise.all([
     detectFaces(videoPath, sampleTimes),
     detectSceneCuts(videoPath, 0, info.dur),
   ]);
-  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0, sceneCuts);
+  let   segments   = buildSegmentsFromFrames(sampleTimes, faceData.frames, 0, sceneCuts, faceData.grids);
   segments         = mergeShortSegments(segments, MIN_SEGMENT_SECS);
 
   const rawTimeline = expandToTimeline(segments, 0, info.dur);
@@ -1306,8 +1509,8 @@ async function analyzeSpeakers(videoPath) {
     parseFloat((i * info.dur / (totalSamples - 1 || 1)).toFixed(2))
   );
 
-  const faceFrames = await detectFaces(videoPath, sampleTimes);
-  let   segments   = buildSegmentsFromFrames(sampleTimes, faceFrames, 0);
+  const faceData   = await detectFaces(videoPath, sampleTimes);
+  let   segments   = buildSegmentsFromFrames(sampleTimes, faceData.frames, 0, [], faceData.grids);
   segments         = mergeShortSegments(segments, MIN_SEGMENT_SECS);
 
   let faceDur = 0, splitDur = 0, blurDur = 0, totalDur = 0;

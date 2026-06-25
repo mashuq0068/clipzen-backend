@@ -244,7 +244,7 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
     return true;
   }
 
-  const segments = [];
+  let segments = [];
   for (const raw of rawSegments) {
     const last = segments[segments.length - 1];
     if (last && decisionsMatch(last.decision, raw.decision)) {
@@ -253,6 +253,17 @@ function buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, clipDuration)
       segments.push({ ...raw });
     }
   }
+
+  // DEFENSIVE CLAMP: every segment must stay inside [0, clipDuration]. A trim
+  // that exceeds the cut (stray boundary entry, FP drift, etc.) makes ffmpeg
+  // wait for frames past the cut and deadlock. Clamp + drop empty slivers.
+  segments = segments
+    .map(s => ({
+      ...s,
+      startT: Math.max(0, Math.min(s.startT, clipDuration)),
+      endT:   Math.max(0, Math.min(s.endT,   clipDuration)),
+    }))
+    .filter(s => s.endT - s.startT >= 0.05);
 
   // CRITICAL CAPTION-SYNC FIX: the per-segment concat MUST cover the entire clip
   // [0, clipDuration]. The reframe timeline sometimes doesn't start at exactly 0
@@ -446,8 +457,14 @@ async function cutSingleSegment(ffmpeg, videoPath, startSec, endSec, outputPath,
 }
 
 // ─── stitchSegments ───────────────────────────────────────────────────────────
-async function stitchSegments(ffmpeg, videoPath, segments, outputPath, filterSpec, videoArgs, tmpDir) {
+async function stitchSegments(ffmpeg, videoPath, segments, outputPath, ctx, videoArgs, tmpDir) {
+  const {
+    timeline = [], srcW = 1920, srcH = 1080,
+    grade, cropHint, isAlreadyVertical = false,
+  } = ctx || {};
+
   const tmpFiles = [];
+  let clipTimeOffset = 0;   // cumulative clip-time, mirrors workerHelpers' stitch offset
   try {
     for (let i = 0; i < segments.length; i++) {
       const seg      = segments[i];
@@ -455,7 +472,32 @@ async function stitchSegments(ffmpeg, videoPath, segments, outputPath, filterSpe
       const tmpPath  = path.join(tmpDir, `_seg_${Date.now()}_${i}.mp4`);
       tmpFiles.push(tmpPath);
 
-      console.log(`      Segment ${i + 1}: ${formatTime(seg.startSec)}→${formatTime(seg.endSec)} (${duration.toFixed(1)}s)`);
+      // Fade in only on the first piece, out only on the last (no per-piece flicker).
+      const fadeParts = [];
+      if (i === 0) fadeParts.push("fade=t=in:st=0:d=0.3");
+      if (i === segments.length - 1) fadeParts.push(`fade=t=out:st=${Math.max(0, duration - 0.4).toFixed(2)}:d=0.4`);
+      const segFade = fadeParts.join(",") || "null";
+
+      // Slice the COMBINED timeline to THIS range's clip-time window and rebase
+      // it to start at 0, so every trim stays within [0, duration] of this cut.
+      // STRICT upper bound excludes the NEXT range's boundary entry (which would
+      // otherwise make a trim run past the cut → ffmpeg deadlock).
+      let filterSpec;
+      if (isAlreadyVertical || timeline.length === 0) {
+        filterSpec = buildStaticFilterSpec({ mode: "passthrough" }, cropHint, srcW, srcH, grade, segFade);
+      } else {
+        const slice = timeline
+          .filter(e => e.clipTimeSec >= clipTimeOffset - 0.05 && e.clipTimeSec < clipTimeOffset + duration - 0.01)
+          .map(e => ({ ...e, clipTimeSec: Math.max(0, parseFloat((e.clipTimeSec - clipTimeOffset).toFixed(3))) }));
+        filterSpec = slice.length
+          ? buildDynamicFilterSpec(slice, srcW, srcH, grade, segFade, duration)
+          : buildStaticFilterSpec({ mode: "passthrough" }, cropHint, srcW, srcH, grade, segFade);
+      }
+
+      console.log(
+        `      Segment ${i + 1}: ${formatTime(seg.startSec)}→${formatTime(seg.endSec)} (${duration.toFixed(1)}s) ` +
+        `[${filterSpec.mode === "fc" ? (filterSpec.isSplit ? "split" : "dynamic") : filterSpec.mode}]`
+      );
 
       await execFileAsync(
         ffmpeg,
@@ -473,17 +515,23 @@ async function stitchSegments(ffmpeg, videoPath, segments, outputPath, filterSpe
         ],
         { timeout: 5 * 60 * 1000 }
       );
+
+      clipTimeOffset += duration;
     }
 
     const n         = tmpFiles.length;
     const inputArgs = tmpFiles.flatMap(f => ["-i", f]);
-    const streams   = Array.from({ length: n }, (_, i) => `[${i}:v][${i}:a]`).join("");
+    // Normalise pixel aspect (SAR) of every piece before concat — different
+    // per-range layouts (e.g. split vs face) can yield slightly different SARs,
+    // and concat refuses to join mismatched SARs.
+    const pre     = Array.from({ length: n }, (_, i) => `[${i}:v]setsar=1[v${i}]`).join(";");
+    const streams = Array.from({ length: n }, (_, i) => `[v${i}][${i}:a]`).join("");
 
     await execFileAsync(
       ffmpeg,
       [
         ...inputArgs,
-        "-filter_complex", `${streams}concat=n=${n}:v=1:a=1[outv][outa]`,
+        "-filter_complex", `${pre};${streams}concat=n=${n}:v=1:a=1[outv][outa]`,
         "-map", "[outv]",
         "-map", "[outa]",
         ...videoArgs,
@@ -549,8 +597,6 @@ async function cutClip(
       ? ["-c:v", "h264_nvenc", "-preset", preset, "-cq", String(crf), "-profile:v", "main", "-level", "4.0"]
       : ["-c:v", "libx264", "-preset", preset, "-crf", String(crf), "-profile:v", "main", "-level", "4.0"];
 
-    let filterSpec;
-
     const {
       timeline        = [],
       srcW            = 1920,
@@ -558,25 +604,28 @@ async function cutClip(
       isAlreadyVertical = false,
     } = clipTimeline || {};
 
-    if (isAlreadyVertical || timeline.length === 0) {
-      console.log(`[clipCutter] no timeline → passthrough`);
-      filterSpec = buildStaticFilterSpec(
-        { mode: "passthrough" },
-        cropHint, srcW, srcH, grade, fade
-      );
-    } else {
-      console.log(`[clipCutter] applying dynamic crop (${timeline.length} timeline entries)`);
-      filterSpec = buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, totalDuration);
-    }
-
-    console.log(`[clipCutter] filterSpec.mode=${filterSpec.mode} isSplit=${filterSpec.isSplit}`);
-
     if (isMultiSeg) {
+      // Stitched clip: render EACH range with its OWN layout, taken from that
+      // range's slice of the combined timeline. stitchSegments rebases each
+      // slice to 0→rangeDuration, so trims never exceed a range cut (no deadlock)
+      // and no single layout is wrongly forced on every range.
       await stitchSegments(
-        ffmpeg, videoPath, clipPlan.segments,
-        outputPath, filterSpec, videoArgs, clipDir
+        ffmpeg, videoPath, clipPlan.segments, outputPath,
+        { timeline, srcW, srcH, grade, cropHint, isAlreadyVertical },
+        videoArgs, clipDir
       );
     } else {
+      let filterSpec;
+      if (isAlreadyVertical || timeline.length === 0) {
+        console.log(`[clipCutter] no timeline → passthrough`);
+        filterSpec = buildStaticFilterSpec(
+          { mode: "passthrough" }, cropHint, srcW, srcH, grade, fade
+        );
+      } else {
+        console.log(`[clipCutter] applying dynamic crop (${timeline.length} timeline entries)`);
+        filterSpec = buildDynamicFilterSpec(timeline, srcW, srcH, grade, fade, totalDuration);
+      }
+      console.log(`[clipCutter] filterSpec.mode=${filterSpec.mode} isSplit=${filterSpec.isSplit}`);
       await cutSingleSegment(
         ffmpeg, videoPath, startSec, endSec,
         outputPath, filterSpec, videoArgs
